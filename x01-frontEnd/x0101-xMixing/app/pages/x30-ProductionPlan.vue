@@ -1,0 +1,1490 @@
+<script setup lang="ts">
+import { ref, computed, onMounted, watch } from 'vue'
+import { useQuasar, type QTableColumn } from 'quasar'
+import { RouterView } from 'vue-router'
+import { appConfig } from '~/appConfig/config'
+
+const $q = useQuasar()
+const { t } = useI18n()
+const { generateQrDataUrl } = useQrCode()
+
+// Ensure timestamp strings without timezone are treated as UTC
+const toUtcDate = (date: any) => {
+  if (!date) return null
+  if (typeof date === 'string' && !date.endsWith('Z') && !date.includes('+') && !date.includes('-', 10)) {
+    return new Date(date + 'Z')
+  }
+  return new Date(date)
+}
+
+const formatDate = (date: any) => {
+  if (!date) return '-'
+  const d = toUtcDate(date)
+  if (!d || isNaN(d.getTime())) return date
+  return d.toLocaleDateString('en-GB', { timeZone: 'Asia/Bangkok' })
+}
+
+const formatDateTime = (date: any) => {
+  if (!date) return '-'
+  const d = toUtcDate(date)
+  if (!d || isNaN(d.getTime())) return date
+  return d.toLocaleString('en-GB', { timeZone: 'Asia/Bangkok' })
+}
+
+const formatDateForInput = (date: any) => {
+  if (!date) return ''
+  const d = new Date(date)
+  if (isNaN(d.getTime())) return ''
+  const day = String(d.getDate()).padStart(2, '0')
+  const month = String(d.getMonth() + 1).padStart(2, '0')
+  const year = d.getFullYear()
+  return `${day}/${month}/${year}`
+}
+
+const parseInputDate = (val: string | null | undefined) => {
+  if (!val || val === '--/--/----') return null
+  const parts = val.split('/')
+  if (parts.length === 3 && parts[0] && parts[1] && parts[2]) {
+    const day = parseInt(parts[0])
+    const month = parseInt(parts[1]) - 1
+    const year = parseInt(parts[2])
+    const d = new Date(year, month, day)
+    return isNaN(d.getTime()) ? null : d
+  }
+  const d = new Date(val)
+  return isNaN(d.getTime()) ? null : d
+}
+
+const formatDateToApi = (val: string | null | undefined) => {
+  if (!val || val === '--/--/----') return null
+  const parts = val.split('/')
+  if (parts.length === 3 && parts[0] && parts[1] && parts[2]) {
+    const day = parts[0].padStart(2, '0')
+    const month = parts[1].padStart(2, '0')
+    const year = parts[2]
+    return `${year}-${month}-${day}`
+  }
+  // Try fallback for other formats
+  const d = new Date(val)
+  if (isNaN(d.getTime())) return null
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const da = String(d.getDate()).padStart(2, '0')
+  return `${y}-${m}-${da}`
+}
+
+// --- State ---
+const skuId = ref('')
+const skuName = ref('')
+const plantOptions = ref<{ label: string; value: string }[]>([])
+const plant = ref('')
+const productionRequire = ref<number | null>(null) // Total Volume
+const batchStandard = ref<number | null>(null) // Batch Size
+const numberOfBatch = ref<number>(0)
+const totalPlanVolume = computed(() => {
+  if (numberOfBatch.value && batchStandard.value) {
+    return numberOfBatch.value * batchStandard.value
+  }
+  return 0
+})
+const startDate = ref(formatDateForInput(new Date()))
+const finishDate = ref(formatDateForInput(new Date()))
+
+// Plant Configurations from API
+const plantConfigs = ref<Record<string, number>>({})
+const plantNames = ref<Record<string, string>>({})
+
+// Data from API
+const availableSkus = ref<any[]>([])
+const plans = ref<any[]>([])
+const totalPlans = ref(0)
+
+// Pagination
+const currentPage = ref(1)
+const plansPerPage = ref(5)
+const showAll = ref(false)
+
+// Filter state
+const showFilter = ref(false)
+const filterText = ref('')
+
+// Collapsed warehouse groups: key = 'planId-wh'
+const collapsedWh = ref<Record<string, boolean>>({})
+const toggleWh = (planId: string, wh: string) => {
+  const key = `${planId}-${wh}`
+  collapsedWh.value[key] = !collapsedWh.value[key]
+}
+const isWhCollapsed = (planId: string, wh: string) => {
+  return !!collapsedWh.value[`${planId}-${wh}`]
+}
+
+// Filtered plans
+const filteredPlans = computed(() => {
+  if (!filterText.value) return plans.value
+  const needle = filterText.value.toLowerCase()
+  return plans.value.filter((row: any) => {
+    const searchStr = `${row.plan_id} ${row.sku_id} ${row.sku_name || ''} ${plantNames.value[row.plant] || row.plant} ${row.status}`.toLowerCase()
+    return searchStr.includes(needle)
+  })
+})
+
+const totalPages = computed(() => Math.max(1, Math.ceil(totalPlans.value / plansPerPage.value)))
+
+const planSummary = computed(() => {
+  const rows = filteredPlans.value
+  return {
+    count: totalPlans.value,
+    total_volume: rows.reduce((sum: number, p: any) => sum + (p.total_volume || 0), 0),
+    num_batches: rows.reduce((sum: number, p: any) => sum + (p.num_batches || 0), 0),
+  }
+})
+
+// Fetch plants from API
+const fetchPlants = async () => {
+  try {
+    const data = await $fetch<any[]>(`${appConfig.apiBaseUrl}/plants/`)
+    plantOptions.value = data.map((p: any) => ({
+      label: p.plant_name,
+      value: p.plant_id,
+    }))
+    data.forEach((p: any) => {
+      plantConfigs.value[p.plant_id] = p.plant_capacity
+      plantNames.value[p.plant_id] = p.plant_name
+    })
+    if (plantOptions.value.length > 0 && !plant.value) {
+      plant.value = plantOptions.value[0]?.value || ''
+    }
+  } catch (error) {
+    console.error('Error fetching plants:', error)
+  }
+}
+
+// Computed Options
+const skuOptions = computed(() => {
+  return availableSkus.value.map((r) => ({
+    label: r.sku_id,
+    value: r.sku_id,
+    sku_name: r.sku_name,
+  }))
+})
+
+// Auto-fill Batch Size when Plant changes
+watch(
+  plant,
+  (newVal) => {
+    if (newVal && plantConfigs.value[newVal]) {
+      batchStandard.value = plantConfigs.value[newVal]
+    }
+  },
+  { immediate: true },
+)
+
+// Auto-calculate logic
+watch([productionRequire, batchStandard], () => {
+  if (productionRequire.value && batchStandard.value && batchStandard.value > 0) {
+    numberOfBatch.value = Math.ceil(productionRequire.value / batchStandard.value)
+  } else {
+    numberOfBatch.value = 0
+  }
+})
+
+const onManualBatchChange = () => {
+  if (numberOfBatch.value && batchStandard.value && batchStandard.value > 0) {
+    productionRequire.value = numberOfBatch.value * batchStandard.value
+  }
+}
+
+const onSkuIdSelect = (val: any) => {
+  const selected = availableSkus.value.find((s) => s.sku_id === val)
+  if (selected) {
+    skuName.value = selected.sku_name
+  }
+}
+
+const onSkuNameSelect = (val: any) => {
+  const selected = availableSkus.value.find((s) => s.sku_name === val)
+  if (selected) {
+    skuId.value = selected.sku_id
+  }
+}
+
+// Batch stats helper
+const getBatchStats = (plan: any) => {
+  const batches = plan.batches || []
+  return {
+    total: batches.length,
+    fh: batches.filter((b: any) => b.flavour_house).length,
+    spp: batches.filter((b: any) => b.spp).length,
+    recheck: batches.filter((b: any) => b.batch_prepare).length,
+    ready: batches.filter((b: any) => b.ready_to_product).length,
+    prod: batches.filter((b: any) => b.production).length,
+    done: batches.filter((b: any) => b.done).length,
+  }
+}
+
+// Columns — plan_id, SKU_ID, Plant, Plan_vol, Batch_Req, Plan_Start, Plan_Done, Status, Created_at, Actions
+const columns = computed<QTableColumn[]>(() => [
+  { name: 'plan_id', label: 'Plan ID', field: 'plan_id', align: 'left', sortable: true },
+  { name: 'sku_id', label: 'SKU', field: 'sku_id', align: 'left', sortable: true },
+  { name: 'sku_name', label: 'SKU Name', field: 'sku_name', align: 'left', sortable: true },
+  { name: 'plant', label: 'Plant', field: 'plant', align: 'left', sortable: true },
+  { name: 'total_volume', label: 'Plan Vol', field: 'total_volume', align: 'right', sortable: true },
+  { name: 'num_batches', label: 'Batches', field: 'num_batches', align: 'center', sortable: true },
+  { name: 'start_date', label: 'Plan Start', field: 'start_date', align: 'center', sortable: true, format: (val: any) => formatDate(val) },
+  { name: 'finish_date', label: 'Plan Done', field: 'finish_date', align: 'center', sortable: true, format: (val: any) => formatDate(val) },
+  { name: 'status', label: 'Status', field: 'status', align: 'center', sortable: true },
+  { name: 'created_at', label: 'Created At', field: 'created_at', align: 'center', sortable: true, format: (val: any) => formatDateTime(val) },
+  { name: 'actions', label: '', field: 'actions', align: 'center' },
+])
+
+// Batch Columns
+const batchColumns = computed<QTableColumn[]>(() => [
+  { name: 'batch_id', label: 'Batch ID', field: 'batch_id', align: 'left', sortable: true },
+  { name: 'batch_size', label: 'Size', field: 'batch_size', align: 'right', sortable: true },
+  { name: 'flavour_house', label: 'FH', field: 'flavour_house', align: 'center' },
+  { name: 'spp', label: 'SPP', field: 'spp', align: 'center' },
+  { name: 'batch_prepare', label: 'ReCheck', field: 'batch_prepare', align: 'center' },
+  { name: 'ready_to_product', label: 'Ready', field: 'ready_to_product', align: 'center' },
+  { name: 'production', label: 'Prod', field: 'production', align: 'center' },
+  { name: 'done', label: 'Done', field: 'done', align: 'center' },
+])
+// Actions
+// Fetch SKUs
+const fetchSkus = async () => {
+  try {
+    availableSkus.value = await $fetch<any[]>(`${appConfig.apiBaseUrl}/skus/`)
+  } catch (error) {
+    console.error('Error fetching SKUs:', error)
+  }
+}
+
+const fetchPlans = async () => {
+  try {
+    const skip = (currentPage.value - 1) * plansPerPage.value
+    const statusFilter = showAll.value ? 'all' : 'active'
+    const data = await $fetch<{plans: any[], total: number}>(`${appConfig.apiBaseUrl}/production-plans/?skip=${skip}&limit=${plansPerPage.value}&status=${statusFilter}`)
+    // Freeze heavy nested arrays to prevent Vue deep reactivity (performance)
+    for (const p of data.plans) {
+      if (p.batches) Object.freeze(p.batches)
+      if (p.ingredients) Object.freeze(p.ingredients)
+    }
+    plans.value = data.plans
+    totalPlans.value = data.total
+  } catch (error) {
+    console.error('Error fetching plans:', error)
+  }
+}
+
+// Re-fetch when pagination or filter changes
+watch(showAll, () => { currentPage.value = 1; fetchPlans() })
+watch(currentPage, () => fetchPlans())
+watch(plansPerPage, () => { currentPage.value = 1; fetchPlans() })
+
+const isCreating = ref(false)
+
+const resetForm = () => {
+  skuId.value = ''
+  skuName.value = ''
+  plant.value = plantOptions.value.length > 0 ? (plantOptions.value[0]?.value || '') : ''
+  productionRequire.value = null
+  batchStandard.value = null
+  numberOfBatch.value = 0
+  startDate.value = formatDateForInput(new Date())
+  finishDate.value = formatDateForInput(new Date())
+}
+
+const onCreatePlan = async () => {
+  if (!skuId.value || !plant.value || !productionRequire.value || !numberOfBatch.value) {
+    $q.notify({ type: 'warning', message: t('prodPlan.fillAllFields') })
+    return
+  }
+
+  isCreating.value = true
+  try {
+    const payload = {
+      sku_id: skuId.value,
+      sku_name: skuName.value,
+      plant: plant.value,
+      total_volume: Number(productionRequire.value),
+      batch_size: Number(batchStandard.value),
+      num_batches: Number(numberOfBatch.value),
+      start_date: formatDateToApi(startDate.value),
+      finish_date: formatDateToApi(finishDate.value),
+    }
+
+    await $fetch(`${appConfig.apiBaseUrl}/production-plans/`, {
+      method: 'POST',
+      body: payload,
+    })
+
+    $q.notify({ type: 'positive', message: t('prodPlan.createdSuccess') })
+    resetForm()
+    fetchPlans()
+  } catch (error: any) {
+    console.error('Error creating plan:', error)
+    $q.notify({ type: 'negative', message: error.data?.detail || t('prodPlan.failedCreate') })
+  } finally {
+    isCreating.value = false
+  }
+}
+
+
+// Cancel reason options
+const cancelReasonOptions = [
+  'Plan Change',
+  'Customer Request',
+  'Quality Issue',
+  'Material Shortage',
+  'Equipment Failure',
+  'Schedule Conflict',
+  'Duplicate Plan',
+  'Other'
+]
+
+const showCancelDialog = ref(false)
+const cancelPlanTarget = ref<any>(null)
+const cancelReason = ref('')
+const cancelCustomReason = ref('')
+
+const onCancelPlan = (plan: any) => {
+  cancelPlanTarget.value = plan
+  cancelReason.value = ''
+  cancelCustomReason.value = ''
+  showCancelDialog.value = true
+}
+
+const confirmCancelPlan = async () => {
+  const plan = cancelPlanTarget.value
+  if (!plan) return
+
+  const comment = cancelReason.value === 'Other'
+    ? cancelCustomReason.value || 'Other'
+    : cancelReason.value || null
+
+  try {
+    await $fetch(`${appConfig.apiBaseUrl}/production-plans/${plan.id}`, {
+      method: 'DELETE',
+      body: {
+        comment,
+        changed_by: 'user'
+      }
+    })
+    $q.notify({ type: 'positive', message: t('prodPlan.cancelSuccess') })
+    showCancelDialog.value = false
+    fetchPlans()
+  } catch (e) {
+    console.error(e)
+    $q.notify({ type: 'negative', message: t('prodPlan.networkErrorCancel') })
+  }
+}
+
+const showHistory = async (plan: any) => {
+  try {
+    const data = await $fetch<any[]>(`${appConfig.apiBaseUrl}/production-plans/${plan.id}/history`)
+    const historyText = data.length > 0 
+      ? data.map((h: any) => {
+          const date = new Date(h.changed_at).toLocaleString('en-GB')
+          const statusChange = h.old_status && h.new_status 
+            ? `${h.old_status} → ${h.new_status}` 
+            : h.new_status || 'N/A'
+          return `<div style="margin-bottom: 12px; padding: 8px; background: #f5f5f5; border-radius: 4px;">
+            <strong>${h.action.toUpperCase()}</strong> by <strong>${h.changed_by}</strong><br/>
+            <small>${date}</small><br/>
+            Status: ${statusChange}<br/>
+            ${h.remarks ? `<em>${h.remarks}</em>` : ''}
+          </div>`
+        }).join('')
+      : `<p>${t('prodPlan.noHistory')}</p>`
+    
+    $q.dialog({
+      title: t('prodPlan.historyTitle', { id: plan.plan_id }),
+      message: historyText,
+      html: true,
+      style: 'max-width: 600px'
+    })
+  } catch (e) {
+    console.error('Error loading history:', e)
+    $q.notify({ type: 'negative', message: t('common.error') })
+  }
+}
+
+const printBatchLabel = async (plan: any, batch: any) => {
+  const existingIframe = document.getElementById('print-iframe')
+  if (existingIframe) {
+    document.body.removeChild(existingIframe)
+  }
+
+  const iframe = document.createElement('iframe')
+  iframe.id = 'print-iframe'
+  iframe.style.position = 'fixed'
+  iframe.style.right = '0'
+  iframe.style.bottom = '0'
+  iframe.style.width = '1px'
+  iframe.style.height = '1px'
+  iframe.style.border = '0'
+  iframe.style.opacity = '0.01'
+  document.body.appendChild(iframe)
+
+  try {
+    const templateResponse = await fetch('/labels/BatchPlan-Label_4x3.svg')
+    const templateStr = await templateResponse.text()
+
+    // Determine batch index from the batch_id string (e.g. plan-Line-1-2026-02-23-001-003 -> 3)
+    const batchIndex = batch.batch_id ? parseInt(batch.batch_id.split('-').pop() || '1', 10) : 1
+    const totalBatches = plan.num_batches || plan.batches?.length || 1
+
+    const qrLarge = await generateQrDataUrl(batch.batch_id, 150)
+
+    const plantName = plantNames.value[plan.plant] || plan.plant || '-'
+
+    let formattedSvg = templateStr
+      .replace(/\{\{PlanId\}\}/g, plan.plan_id || '-')
+      .replace(/\{\{BatchId\}\}/g, batch.batch_id || '-')
+      .replace(/\{\{SKU\}\}/g, `${plan.sku_id}${plan.sku_name ? ' - ' + plan.sku_name : ''}`)
+      .replace(/\{\{BatchNo\}\}/g, `${batchIndex} / ${totalBatches}`)
+      .replace(/\{\{PlanStartDate\}\}/g, plan.start_date || '-')
+      .replace(/\{\{PlanFinishDate\}\}/g, plan.finish_date || '-')
+      .replace(/\{\{BatchSize\}\}/g, batch.batch_size?.toString() || '0')
+      .replace(/\{\{PlanSize\}\}/g, plan.total_plan_volume?.toString() || '0')
+      .replace(/\{\{PlantId\}\}/g, plan.plant || '-')
+      .replace(/\{\{PlantName\}\}/g, plantName)
+    // Replace fixed width/height in SVG with 100% so it scales to container
+    formattedSvg = formattedSvg.replace(/(<svg[\s\S]*?)width="[^"]*"/, '$1width="100%"')
+                               .replace(/(<svg[\s\S]*?)height="[^"]*"/, '$1height="100%"')
+
+    const html = `<html><head><style>
+    * { margin:0; padding:0; outline:0; border:0; box-sizing:border-box; }
+    @page { size: auto; margin: 0 !important; }
+    html, body { width: 4in; background: white; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    .label-wrapper { 
+      width: 4in; 
+      height: 3in; 
+      display: block; 
+      overflow: hidden; 
+      position: relative; 
+      padding-left: 2.5mm; 
+      padding-top: 1.5mm; 
+      box-sizing: border-box; 
+      page-break-after: always; 
+    }
+    .label-wrapper:last-child { page-break-after: avoid; }
+    .label-wrapper svg { width: 100%; height: 100%; display: block; }
+    header, footer { display: none !important; }
+  </style></head><body><div class="label-wrapper">${formattedSvg}</div></body></html>`.replace(/>\s+</g, '><').trim()
+
+    const doc = iframe.contentWindow?.document
+    if (doc) {
+      doc.open()
+      doc.write(html)
+      doc.close()
+      iframe.onload = () => {
+        iframe.contentWindow?.focus()
+        iframe.contentWindow?.print()
+      }
+    }
+  } catch (error) {
+    console.error('Failed to print batch label:', error)
+    $q.notify({ type: 'negative', message: t('prodPlan.failedGenerateLabel') })
+  }
+}
+
+const printAllBatchLabels = async (plan: any) => {
+  const batches = plan.batches
+  if (!batches || batches.length === 0) {
+    $q.notify({ type: 'warning', message: t('prodPlan.noBatchesToPrint') })
+    return
+  }
+
+  const existingIframe = document.getElementById('print-iframe')
+  if (existingIframe) {
+    document.body.removeChild(existingIframe)
+  }
+
+  const iframe = document.createElement('iframe')
+  iframe.id = 'print-iframe'
+  iframe.style.position = 'fixed'
+  iframe.style.right = '0'
+  iframe.style.bottom = '0'
+  iframe.style.width = '1px'
+  iframe.style.height = '1px'
+  iframe.style.border = '0'
+  iframe.style.opacity = '0.01'
+  document.body.appendChild(iframe)
+
+  try {
+    const templateResponse = await fetch('/labels/BatchPlan-Label_4x3.svg')
+    const templateStr = await templateResponse.text()
+    const plantName = plantNames.value[plan.plant] || plan.plant || '-'
+    const totalBatches = plan.num_batches || batches.length || 1
+
+    let labelsHtml = ''
+
+    for (let i = 0; i < batches.length; i++) {
+      const batch = batches[i]
+      const batchIndex = batch.batch_id ? parseInt(batch.batch_id.split('-').pop() || '1', 10) : (i + 1)
+
+      const qrLarge = await generateQrDataUrl(batch.batch_id, 150)
+
+      const svgContent = templateStr
+        .replace(/\{\{PlanId\}\}/g, plan.plan_id || '-')
+        .replace(/\{\{BatchId\}\}/g, batch.batch_id || '-')
+        .replace(/\{\{SKU\}\}/g, `${plan.sku_id}${plan.sku_name ? ' - ' + plan.sku_name : ''}`)
+        .replace(/\{\{BatchNo\}\}/g, `${batchIndex} / ${totalBatches}`)
+        .replace(/\{\{PlanStartDate\}\}/g, plan.start_date || '-')
+        .replace(/\{\{PlanFinishDate\}\}/g, plan.finish_date || '-')
+        .replace(/\{\{BatchSize\}\}/g, batch.batch_size?.toString() || '0')
+        .replace(/\{\{PlanSize\}\}/g, plan.total_plan_volume?.toString() || '0')
+        .replace(/\{\{PlantId\}\}/g, plan.plant || '-')
+        .replace(/\{\{PlantName\}\}/g, plantName)
+        .replace(/\{\{Timestamp\}\}/g, new Date().toLocaleString('en-GB'))
+        .replace(/\{\{QRCode\}\}/g, `<image href="${qrLarge}" x="18.9" y="132.8" width="134" height="134" />`)
+
+      // Replace fixed width/height in SVG with 100%. --
+      const finalSvg = svgContent.replace(/(<svg[\s\S]*?)width="[^"]*"/, '$1width="100%"')
+                                 .replace(/(<svg[\s\S]*?)height="[^"]*"/, '$1height="100%"')
+
+      labelsHtml += `<div class="label-wrapper">${finalSvg}</div>`
+    }
+
+    const html = `<html><head><style>
+    * { margin:0; padding:0; outline:0; border:0; box-sizing:border-box; }
+    @page { size: auto; margin: 0 !important; }
+    html, body { width: 4in; background: white; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    .label-wrapper { 
+      width: 4in; 
+      height: 3in; 
+      display: block; 
+      overflow: hidden; 
+      position: relative; 
+      padding-left: 2.5mm; 
+      padding-top: 1.5mm; 
+      box-sizing: border-box; 
+      page-break-after: always; 
+    }
+    .label-wrapper:last-child { page-break-after: avoid; }
+    .label-wrapper svg { width: 100%; height: 100%; display: block; }
+    header, footer { display: none !important; }
+  </style></head><body>${labelsHtml}</body></html>`.replace(/>\s+</g, '><').trim()
+
+    const doc = iframe.contentWindow?.document
+    if (doc) {
+      doc.open()
+      doc.write(html)
+      doc.close()
+      iframe.onload = () => {
+        iframe.contentWindow?.focus()
+        iframe.contentWindow?.print()
+      }
+    }
+  } catch (error) {
+    console.error('Failed to print all batch labels:', error)
+    $q.notify({ type: 'negative', message: t('prodPlan.failedGenerateLabels') })
+  }
+}
+
+// Expand / Collapse All
+const expandedRows = ref<any[]>([])
+
+const expandAll = () => {
+  expandedRows.value = filteredPlans.value.map((p: any) => p.id)
+}
+
+const collapseAll = () => {
+  expandedRows.value = []
+}
+
+const printPlan = (plan: any) => {
+  const printWindow = window.open('', '_blank')
+  if (!printWindow) return
+  
+  const batchesHTML = plan.batches?.map((batch: any, index: number) => `
+    <tr>
+      <td style="border: 1px solid #ddd; padding: 8px;">${index + 1}</td>
+      <td style="border: 1px solid #ddd; padding: 8px;">${batch.batch_id}</td>
+      <td style="border: 1px solid #ddd; padding: 8px;">${batch.batch_size || 'N/A'}</td>
+      <td style="border: 1px solid #ddd; padding: 8px;">${batch.status}</td>
+    </tr>
+  `).join('') || '<tr><td colspan="4" style="text-align: center; padding: 16px;">No batches</td></tr>'
+  
+  const html = `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>Production Plan - ${plan.plan_id}</title>
+      <style>
+        @page { size: A4; margin: 20mm; }
+        body { font-family: Arial, sans-serif; font-size: 12px; }
+        h1 { font-size: 18px; margin-bottom: 10px; }
+        h2 { font-size: 14px; margin-top: 20px; margin-bottom: 10px; }
+        table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
+        th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+        th { background-color: #f2f2f2; font-weight: bold; }
+        .summary { background-color: #f9f9f9; padding: 10px; margin-top: 20px; }
+      </style>
+    </head>
+    <body>
+      <div style="page-break-after: always;">
+        <h1 style="text-align: center; color: #1976d2; border-bottom: 2px solid #1976d2; padding-bottom: 10px;">${t('prodPlan.summaryReportTitle')}</h1>
+        <table style="width: 100%; border-collapse: collapse; margin-top: 20px;">
+          <tr><th style="width: 40%; background: #f5f5f5; border: 1px solid #ddd; padding: 12px; text-align: left;">${t('prodPlan.planId')}</th><td style="border: 1px solid #ddd; padding: 12px;">${plan.plan_id}</td></tr>
+          <tr><th style="background: #f5f5f5; border: 1px solid #ddd; padding: 12px; text-align: left;">${t('prodPlan.skuId')}</th><td style="border: 1px solid #ddd; padding: 12px;">${plan.sku_id}</td></tr>
+          <tr><th style="background: #f5f5f5; border: 1px solid #ddd; padding: 12px; text-align: left;">${t('prodPlan.skuName')}</th><td style="border: 1px solid #ddd; padding: 12px;">${plan.sku_name || '—'}</td></tr>
+          <tr><th style="background: #f5f5f5; border: 1px solid #ddd; padding: 12px; text-align: left;">${t('prodPlan.plant')}</th><td style="border: 1px solid #ddd; padding: 12px;">${plantNames.value[plan.plant] || plan.plant}</td></tr>
+          <tr><th style="background: #f5f5f5; border: 1px solid #ddd; padding: 12px; text-align: left;">${t('prodPlan.totalPlanVol')}</th><td style="border: 1px solid #ddd; padding: 12px;">${plan.total_plan_volume || '0'} kg</td></tr>
+          <tr><th style="background: #f5f5f5; border: 1px solid #ddd; padding: 12px; text-align: left;">${t('prodPlan.numBatches')}</th><td style="border: 1px solid #ddd; padding: 12px;">${plan.num_batches || 0}</td></tr>
+          <tr><th style="background: #f5f5f5; border: 1px solid #ddd; padding: 12px; text-align: left;">${t('prodPlan.batchSize')}</th><td style="border: 1px solid #ddd; padding: 12px;">${plan.batch_size || '—'} kg</td></tr>
+          <tr><th style="background: #f5f5f5; border: 1px solid #ddd; padding: 12px; text-align: left;">${t('prodPlan.startDate')} - ${t('prodPlan.finishDate')}</th><td style="border: 1px solid #ddd; padding: 12px;">${formatDate(plan.start_date)} to ${formatDate(plan.finish_date)}</td></tr>
+          <tr><th style="background: #f5f5f5; border: 1px solid #ddd; padding: 12px; text-align: left;">${t('common.status')}</th><td style="border: 1px solid #ddd; padding: 12px;"><strong>${plan.status}</strong></td></tr>
+        </table>
+        
+        <div style="margin-top: 40px; background: #f9f9f9; padding: 20px; border-radius: 8px; border-left: 5px solid #1976d2;">
+          <h2 style="margin-top: 0; font-size: 16px;">${t('prodPlan.creationDetails')}</h2>
+          <p><strong>Created:</strong> ${formatDateTime(plan.created_at)}</p>
+          <p><strong>Created By:</strong> ${plan.created_by || '—'}</p>
+          ${plan.updated_by ? '<p><strong>Last Updated By:</strong> ' + plan.updated_by + '</p>' : ''}
+        </div>
+      </div>
+      
+      <div>
+        <h2 style="color: #1976d2; border-bottom: 2px solid #1976d2; padding-bottom: 10px;">${t('prodPlan.batchDetails')}</h2>
+        <table style="width: 100%; border-collapse: collapse; margin-top: 10px;">
+          <thead>
+            <tr>
+              <th style="border: 1px solid #ddd; padding: 8px; background: #f5f5f5;">#</th>
+              <th style="border: 1px solid #ddd; padding: 8px; background: #f5f5f5;">${t('prodPlan.batchId')}</th>
+              <th style="border: 1px solid #ddd; padding: 8px; background: #f5f5f5;">${t('prodPlan.batchSize')} (kg)</th>
+              <th style="border: 1px solid #ddd; padding: 8px; background: #f5f5f5;">${t('common.status')}</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${batchesHTML}
+          </tbody>
+        </table>
+      </div>
+      ` + 
+      '<script>' +
+      '  window.onload = () => {' +
+      '    window.print();' +
+      '    window.onafterprint = () => window.close();' +
+      '  };' +
+      '<' + '/script>' +
+      `
+    </body>
+    </html>
+  `
+
+  
+  printWindow.document.write(html)
+  printWindow.document.close()
+}
+
+const printAllPlans = () => {
+  const printWindow = window.open('', '_blank')
+  if (!printWindow) return
+  
+  const plansHTML = filteredPlans.value.map((plan: any) => {
+    const batchesHTML = plan.batches?.map((batch: any, index: number) => `
+      <tr>
+        <td style="border: 1px solid #ddd; padding: 4px; font-size: 10px;">${index + 1}</td>
+        <td style="border: 1px solid #ddd; padding: 4px; font-size: 10px;">${batch.batch_id}</td>
+        <td style="border: 1px solid #ddd; padding: 4px; font-size: 10px;">${batch.batch_size || '—'}</td>
+        <td style="border: 1px solid #ddd; padding: 4px; font-size: 10px;">${batch.status}</td>
+      </tr>
+    `).join('') || `<tr><td colspan="4" style="text-align: center; padding: 8px; font-size: 10px;">${t('common.noData')}</td></tr>`
+    
+    return `
+      <!-- Page 1: Plan Summary -->
+      <div style="page-break-after: always; margin-bottom: 20px;">
+        <h2 style="font-size: 16px; margin-bottom: 15px; color: #1976d2; border-bottom: 1px solid #1976d2; padding-bottom: 5px;">
+          ${plan.plan_id} - ${t('common.details')}
+        </h2>
+        <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px; font-size: 11px;">
+          <tr><th style="border: 1px solid #ddd; padding: 8px; background: #f2f2f2; width: 35%;">SKU</th><td style="border: 1px solid #ddd; padding: 8px;">${plan.sku_id} - ${plan.sku_name || ''}</td></tr>
+          <tr><th style="border: 1px solid #ddd; padding: 8px; background: #f2f2f2;">${t('prodPlan.plant')}</th><td style="border: 1px solid #ddd; padding: 8px;">${plantNames.value[plan.plant] || plan.plant}</td></tr>
+          <tr><th style="border: 1px solid #ddd; padding: 8px; background: #f2f2f2;">${t('prodPlan.totalPlanVol')}</th><td style="border: 1px solid #ddd; padding: 8px;">${plan.total_plan_volume || '—'} kg</td></tr>
+          <tr><th style="border: 1px solid #ddd; padding: 8px; background: #f2f2f2;">${t('prodPlan.numBatches')}</th><td style="border: 1px solid #ddd; padding: 8px;">${plan.num_batches || 0}</td></tr>
+          <tr><th style="border: 1px solid #ddd; padding: 8px; background: #f2f2f2;">${t('prodPlan.startDate')} - ${t('prodPlan.finishDate')}</th><td style="border: 1px solid #ddd; padding: 8px;">${formatDate(plan.start_date)} to ${formatDate(plan.finish_date)}</td></tr>
+          <tr><th style="border: 1px solid #ddd; padding: 8px; background: #f2f2f2;">${t('common.status')}</th><td style="border: 1px solid #ddd; padding: 8px;"><strong>${plan.status}</strong></td></tr>
+        </table>
+        
+        <div style="margin-top: 30px; background: #f9f9f9; padding: 15px; border-radius: 5px; border-left: 5px solid #1976d2;">
+          <h3 style="margin-top: 0; font-size: 12px;">${t('prodPlan.creationDetails')}</h3>
+          <p style="margin: 5px 0;"><strong>Created:</strong> ${formatDateTime(plan.created_at)}</p>
+          <p style="margin: 5px 0;"><strong>Created By:</strong> ${plan.created_by || '—'}</p>
+          ${plan.updated_by ? `<p style="margin: 5px 0;"><strong>Last Updated By:</strong> ${plan.updated_by}</p>` : ''}
+        </div>
+      </div>
+
+      <!-- Page 2: Batch Details -->
+      <div style="page-break-after: always; margin-bottom: 20px;">
+        <h2 style="font-size: 16px; margin-bottom: 15px; color: #1976d2; border-bottom: 1px solid #1976d2; padding-bottom: 5px;">
+          ${plan.plan_id} - ${t('prodPlan.batchDetails')}
+        </h2>
+        <table style="width: 100%; border-collapse: collapse;">
+          <thead>
+            <tr>
+              <th style="border: 1px solid #ddd; padding: 6px; background: #f2f2f2; font-size: 11px;">#</th>
+              <th style="border: 1px solid #ddd; padding: 6px; background: #f2f2f2; font-size: 11px;">${t('prodPlan.batchId')}</th>
+              <th style="border: 1px solid #ddd; padding: 6px; background: #f2f2f2; font-size: 11px;">${t('prodPlan.batchSize')} (kg)</th>
+              <th style="border: 1px solid #ddd; padding: 6px; background: #f2f2f2; font-size: 11px;">${t('common.status')}</th>
+            </tr>
+          </thead>
+          <tbody>${batchesHTML}</tbody>
+        </table>
+      </div>
+    `
+  }).join('')
+  
+  const totalPlans = filteredPlans.value.length
+  const totalBatches = filteredPlans.value.reduce((sum: number, plan: any) => sum + (plan.batches?.length || 0), 0)
+  const totalVolume = filteredPlans.value.reduce((sum: number, plan: any) => sum + (plan.total_plan_volume || 0), 0)
+  
+  // Breakdown calculations remain same
+  const statusCounts: Record<string, number> = {}
+  const plantCounts: Record<string, number> = {}
+  const plantVolumes: Record<string, number> = {}
+  
+  filteredPlans.value.forEach((plan: any) => {
+    statusCounts[plan.status] = (statusCounts[plan.status] || 0) + 1
+    const pName = plantNames.value[plan.plant] || plan.plant
+    plantCounts[pName] = (plantCounts[pName] || 0) + 1
+    plantVolumes[pName] = (plantVolumes[pName] || 0) + (plan.total_plan_volume || 0)
+  })
+
+  const statusRows = Object.entries(statusCounts).map(([status, count]) => 
+    `<tr><td style="border: 1px solid #ddd; padding: 8px;">${status}</td><td style="border: 1px solid #ddd; padding: 8px; text-align: right;">${count}</td></tr>`
+  ).join('')
+  
+  const plantRows = Object.entries(plantCounts).map(([p, count]) => 
+    `<tr><td style="border: 1px solid #ddd; padding: 8px;">${p}</td><td style="border: 1px solid #ddd; padding: 8px; text-align: right;">${count}</td><td style="border: 1px solid #ddd; padding: 8px; text-align: right;">${(plantVolumes[p] || 0).toFixed(2)} kg</td></tr>`
+  ).join('')
+
+  const summaryPage = `
+    <div style="page-break-after: always; margin-bottom: 30px;">
+      <h1 style="font-size: 24px; color: #1976d2; text-align: center; margin-bottom: 20px; border-bottom: 3px solid #1976d2; padding-bottom: 10px;">
+        ${t('prodPlan.summaryReportTitle')}
+      </h1>
+      
+      <div style="background: linear-gradient(135deg, #1976d2 0%, #1565c0 100%); color: white; padding: 20px; border-radius: 8px; margin-bottom: 25px;">
+        <h2 style="margin: 0 0 15px 0; font-size: 18px;">${t('prodPlan.overallStats')}</h2>
+        <div style="display: flex; justify-content: space-around; gap: 10px;">
+          <div style="background: rgba(255,255,255,0.2); padding: 15px; border-radius: 5px; text-align: center; flex: 1;">
+            <div style="font-size: 28px; font-weight: bold;">${totalPlans}</div>
+            <div style="font-size: 11px;">Total Plans</div>
+          </div>
+          <div style="background: rgba(255,255,255,0.2); padding: 15px; border-radius: 5px; text-align: center; flex: 1;">
+            <div style="font-size: 28px; font-weight: bold;">${totalBatches}</div>
+            <div style="font-size: 11px;">Total Batches</div>
+          </div>
+          <div style="background: rgba(255,255,255,0.2); padding: 15px; border-radius: 5px; text-align: center; flex: 1;">
+            <div style="font-size: 28px; font-weight: bold;">${totalVolume.toFixed(2)}</div>
+            <div style="font-size: 11px;">Total Volume (kg)</div>
+          </div>
+        </div>
+      </div>
+      
+      <div style="margin-bottom: 20px;">
+        <h2 style="font-size: 14px; border-left: 4px solid #1976d2; padding-left: 8px; margin-bottom: 10px;">${t('prodPlan.statusBreakdown')}</h2>
+        <table style="width: 100%; border-collapse: collapse; font-size: 12px;">
+          <thead>
+            <tr><th style="border: 1px solid #ddd; padding: 8px; background: #f5f5f5; text-align: left;">${t('common.status')}</th><th style="border: 1px solid #ddd; padding: 8px; background: #f5f5f5; text-align: right;">Count</th></tr>
+          </thead>
+          <tbody>${statusRows}</tbody>
+        </table>
+      </div>
+      
+      <div>
+        <h2 style="font-size: 14px; border-left: 4px solid #1976d2; padding-left: 8px; margin-bottom: 10px;">${t('prodPlan.plantDist')}</h2>
+        <table style="width: 100%; border-collapse: collapse; font-size: 12px;">
+          <thead>
+            <tr>
+              <th style="border: 1px solid #ddd; padding: 8px; background: #f5f5f5; text-align: left;">${t('prodPlan.plant')}</th>
+              <th style="border: 1px solid #ddd; padding: 8px; background: #f5f5f5; text-align: right;">Plans</th>
+              <th style="border: 1px solid #ddd; padding: 8px; background: #f5f5f5; text-align: right;">Total Volume</th>
+            </tr>
+          </thead>
+          <tbody>${plantRows}</tbody>
+        </table>
+      </div>
+    </div>
+  `
+
+  const html = `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>${t('prodPlan.title')}</title>
+      <style>
+        @page { size: A4; margin: 15mm; }
+        body { font-family: Arial, sans-serif; }
+        h1 { font-size: 16px; margin-bottom: 15px; }
+        table { border-collapse: collapse; }
+      </style>
+    </head>
+    <body>
+      ${summaryPage}
+      <h1 style="text-align: center; border-bottom: 1px solid #eee; padding-bottom: 10px;">${t('prodPlan.title')}</h1>
+      ${plansHTML}
+      <script>
+        window.onload = () => {
+          window.print();
+          window.onafterprint = () => window.close();
+        };
+      </scr` + `ipt>
+    </body>
+    </html>
+  `
+  
+  printWindow.document.write(html)
+  printWindow.document.close()
+}
+
+
+
+
+// Search support for QSelect
+const filteredSkuIdOptions = ref<any[]>([])
+const filteredSkuNameOptions = ref<any[]>([])
+
+const skuNameOptions = computed(() => {
+  return availableSkus.value.map((r) => ({
+    label: r.sku_name,
+    value: r.sku_name,
+  }))
+})
+
+const onSkuIdFilter = (val: string, update: any) => {
+  update(() => {
+    const needle = val.toLowerCase()
+    filteredSkuIdOptions.value = skuOptions.value.filter(
+      (v) => v.label.toLowerCase().includes(needle) || v.value.toLowerCase().includes(needle),
+    )
+  })
+}
+
+const onSkuNameFilter = (val: string, update: any) => {
+  update(() => {
+    const needle = val.toLowerCase()
+    filteredSkuNameOptions.value = skuNameOptions.value.filter((v: any) =>
+      v.label.toLowerCase().includes(needle),
+    )
+  })
+}
+
+// Styling Helper
+const getStatusColor = (status: string) => {
+  if (status === 'Hold') return 'text-magenta'
+  return 'text-blue-8'
+}
+
+// Read ingredients directly from plan data (embedded in API response)
+const getPlanIngredients = (plan: any) => {
+  return plan.ingredients || []
+}
+
+const getIngredientsByWarehouse = (plan: any) => {
+  const items = getPlanIngredients(plan)
+  const groups: Record<string, { wh: string, items: any[], totalVol: number }> = {}
+  const order = ['MIX', 'FH', 'SPP']
+  
+  for (const ing of items) {
+    const wh = ing.wh || '-'
+    if (!groups[wh]) groups[wh] = { wh, items: [], totalVol: 0 }
+    groups[wh].items.push(ing)
+    groups[wh].totalVol += ing.total_vol || 0
+  }
+  
+  // Sort: MIX first, then FH, then SPP, then others
+  return Object.values(groups).sort((a, b) => {
+    const ai = order.indexOf(a.wh)
+    const bi = order.indexOf(b.wh)
+    return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi)
+  })
+}
+
+
+// ── Reports ──────────────────────────────────
+const showDailyReportDialog = ref(false)
+const dailyReportDate = ref(formatDateForInput(new Date()))
+const dailyReportLoading = ref(false)
+
+const printDailyReport = async () => {
+  dailyReportLoading.value = true
+  const printWindow = window.open('', '_blank')
+  if (!printWindow) {
+    $q.notify({ type: 'warning', message: 'Popup blocked. Allow popups.', position: 'top' })
+    dailyReportLoading.value = false
+    return
+  }
+  printWindow.document.write('<html><body><h2 style="font-family:sans-serif;color:#1565c0;">⏳ Loading...</h2></body></html>')
+  try {
+    const apiDate = formatDateToApi(dailyReportDate.value)
+    let url = `${appConfig.apiBaseUrl}/reports/production-daily`
+    if (apiDate) url += `?date=${apiDate}`
+    const data = await $fetch<any>(url)
+    const now = new Date().toLocaleString('en-GB')
+    const dateLabel = dailyReportDate.value || 'Today'
+
+    const plansHTML = (data.plans || []).map((p: any, idx: number) => {
+      const batchRows = (p.batches || []).map((b: any, bi: number) => `
+        <tr><td class="tc">${bi+1}</td><td>${b.batch_id}</td><td class="tr">${(b.batch_size || 0).toFixed(4)}</td><td class="tc">${b.status}</td></tr>
+      `).join('')
+      return `
+        <div class="plan-card">
+          <div class="plan-head">
+            <span class="plan-num">${idx+1}.</span>
+            <span class="plan-id">${p.plan_id}</span>
+            <span class="plan-sku">${p.sku_id} — ${p.sku_name || ''}</span>
+            <span class="plan-status badge-${p.status?.toLowerCase()}">${p.status}</span>
+          </div>
+          <table class="dt"><thead><tr><th style="width:4%">#</th><th>Batch ID</th><th class="tr">Size (kg)</th><th class="tc">Status</th></tr></thead>
+          <tbody>${batchRows || '<tr><td colspan="4" class="tc">No batches</td></tr>'}</tbody></table>
+          <div class="plan-summary">
+            Plant: <strong>${p.plant || '-'}</strong> | Volume: <strong>${(p.total_volume || 0).toFixed(4)}</strong> kg | Batches: <strong>${p.num_batches || 0}</strong>
+          </div>
+        </div>`
+    }).join('')
+
+    const consumptionRows = (data.ingredient_consumption || []).map((c: any, i: number) => `
+      <tr><td class="tc">${i+1}</td><td class="tb">${c.mat_sap_code || '-'}</td><td>${c.re_code || '-'}</td><td class="tr">${(c.total_volume || 0).toFixed(4)}</td><td class="tc">${c.transaction_count}</td></tr>
+    `).join('')
+
+    const s = data.summary || {}
+    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Production Daily Report</title>
+    <style>
+      @page{size:A4 landscape;margin:8mm 10mm}*{box-sizing:border-box;margin:0;padding:0}
+      body{font-family:'Courier Prime','Courier New',monospace;font-size:13px;color:#222;line-height:1.4}
+      .header{background:#1565c0;color:#fff;padding:14px 20px;display:flex;justify-content:space-between;align-items:center;border-radius:4px;margin-bottom:8px}
+      .header h1{font-size:22px;margin:0}.header .meta{font-size:12px;text-align:right;opacity:.9}
+      .info-bar{background:#e3f2fd;padding:8px 14px;border-radius:3px;margin-bottom:10px;font-size:13px;color:#1565c0;font-weight:bold}
+      .plan-card{margin-bottom:12px}.plan-head{background:#263238;color:#fff;padding:8px 14px;font-size:13px;border-radius:3px;margin-bottom:2px}
+      .plan-num{color:#ffc107;font-weight:bold;margin-right:6px}.plan-id{font-weight:bold;margin-right:12px}
+      .plan-sku{font-size:12px;opacity:.85;margin-right:12px}
+      .plan-status{float:right;padding:2px 8px;border-radius:3px;font-size:11px}
+      .badge-planned{background:#fff3e0;color:#e65100}.badge-in\ progress,.badge-active{background:#e3f2fd;color:#1565c0}.badge-completed,.badge-done{background:#e8f5e9;color:#2e7d32}.badge-cancelled{background:#ffebee;color:#c62828}
+      table.dt{width:100%;border-collapse:collapse;font-size:12px;margin-bottom:2px}
+      table.dt th{background:#546e7a;color:#fff;padding:4px 8px;text-align:left;font-size:10px;text-transform:uppercase}
+      table.dt td{padding:4px 8px;border-bottom:1px solid #e0e0e0}
+      .plan-summary{background:#eceff1;padding:6px 14px;font-size:12px;border-radius:0 0 3px 3px}
+      .section-title{background:#37474f;color:#fff;padding:8px 14px;font-size:14px;font-weight:bold;border-radius:3px;margin:12px 0 4px}
+      .grand{background:#1565c0;color:#fff;padding:12px 18px;border-radius:4px;font-size:14px;margin-top:10px;display:flex;justify-content:space-between}
+      .footer{border-top:2px solid #1565c0;font-size:10px;color:#888;padding:6px 0;margin-top:10px;display:flex;justify-content:space-between}
+      .tr{text-align:right}.tc{text-align:center}.tb{font-weight:bold}
+      @media print{body{-webkit-print-color-adjust:exact;print-color-adjust:exact}}
+    </style></head><body>
+    <div class="header"><div><h1>🏭 Production Daily Report</h1><div style="font-size:12px;margin-top:3px;opacity:.85">xMixing Control System</div></div><div class="meta">Date: ${dateLabel}<br>Generated: ${now}</div></div>
+    <div class="info-bar">📅 Date: ${dateLabel} | Plans: ${s.total_plans || 0} | Batches: ${s.total_batches || 0} | Total Volume: ${(s.total_volume || 0).toFixed(4)} kg</div>
+    <div class="section-title">📋 Production Plans</div>
+    ${plansHTML || '<p style="padding:12px;color:#999;">No plans for this date</p>'}
+    ${consumptionRows ? `<div class="section-title">🧪 Ingredient Consumption</div>
+    <table class="dt"><thead><tr><th style="width:4%">#</th><th>Mat SAP Code</th><th>RE Code</th><th class="tr">Volume (kg)</th><th class="tc">Transactions</th></tr></thead>
+    <tbody>${consumptionRows}</tbody></table>` : ''}
+    <div class="grand"><span>Daily Total: ${s.total_plans || 0} plans, ${s.total_batches || 0} batches</span><span>Total Volume: ${(s.total_volume || 0).toFixed(4)} kg</span></div>
+    <div class="footer"><span>xMixing 2025 | xMix.co.th</span><span>Production Daily Report — ${dateLabel}</span></div>
+    </body></html>`
+
+    printWindow.document.open()
+    printWindow.document.write(html)
+    printWindow.document.close()
+    showDailyReportDialog.value = false
+  } catch (e) {
+    console.error('Failed to generate daily report:', e)
+    printWindow.close()
+    $q.notify({ type: 'negative', message: 'Failed to generate report', position: 'top' })
+  } finally {
+    dailyReportLoading.value = false
+  }
+}
+
+onMounted(() => {
+  fetchPlants()
+  fetchSkus()
+  fetchPlans()
+})
+</script>
+
+<template>
+  <!-- If child route is active, show child component. Otherwise show parent content -->
+  <RouterView v-slot="{ Component }">
+    <component v-if="Component" :is="Component" />
+    <q-page v-else class="q-pa-xs bg-white" style="width: 100%; max-width: 100%; min-height: 100vh;">
+      <!-- Header Section -->
+      <div class="bg-blue-9 text-white q-pa-md rounded-borders q-mb-md shadow-2">
+        <div class="row justify-between items-center">
+          <div class="row items-center q-gutter-sm">
+            <q-icon name="account_tree" size="sm" />
+            <div class="text-h6 text-weight-bolder">{{ t('prodPlan.title') }}</div>
+          </div>
+          <div class="row items-center q-gutter-sm">
+            <q-btn flat round dense icon="assessment" text-color="white" @click="showDailyReportDialog = true">
+              <q-tooltip>Production Daily Report</q-tooltip>
+            </q-btn>
+            <div class="text-caption text-weight-bold text-blue-2">{{ t('prodPlan.version') }} 0.3</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Create Plan Form (Top) -->
+      <q-card flat bordered class="shadow-1 q-mb-md" id="create-plan-form">
+        <q-card-section class="q-pa-sm bg-primary text-white row items-center justify-between">
+          <div class="text-subtitle2 text-weight-bold">
+            <q-icon name="add_circle" class="q-mr-xs" />
+            {{ t('prodPlan.createNew') }}
+          </div>
+          <q-btn
+            :label="t('prodPlan.generatePlan')"
+            color="white"
+            text-color="primary"
+            unelevated
+            no-caps
+            :loading="isCreating"
+            icon="playlist_add"
+            size="sm"
+            @click="onCreatePlan"
+            class="text-weight-bold"
+          />
+        </q-card-section>
+
+        <q-card-section class="q-pa-md bg-blue-grey-1">
+          <!-- Form Row 1: SKU & Dates -->
+          <div class="row q-col-gutter-md q-mb-md">
+            <div class="col-12 col-md-3">
+              <div class="text-caption text-weight-bold q-mb-xs">{{ t('prodPlan.skuId') }}</div>
+              <q-select
+                outlined v-model="skuId" :options="filteredSkuIdOptions"
+                dense bg-color="white" use-input input-debounce="0"
+                @filter="onSkuIdFilter" emit-value map-options
+                @update:model-value="onSkuIdSelect"
+              />
+            </div>
+            <div class="col-12 col-md-5">
+              <div class="text-caption text-weight-bold q-mb-xs">{{ t('prodPlan.skuName') }}</div>
+              <q-select
+                outlined v-model="skuName" :options="filteredSkuNameOptions"
+                dense bg-color="white" use-input input-debounce="0"
+                @filter="onSkuNameFilter" emit-value map-options
+                @update:model-value="onSkuNameSelect"
+              />
+            </div>
+            <div class="col-6 col-md-2">
+              <div class="text-caption text-weight-bold q-mb-xs">{{ t('prodPlan.startDate') }}</div>
+              <q-input outlined v-model="startDate" dense bg-color="white" mask="##/##/####" placeholder="DD/MM/YYYY">
+                <template v-slot:append>
+                  <q-icon name="event" class="cursor-pointer">
+                    <q-popup-proxy cover transition-show="scale" transition-hide="scale">
+                      <q-date v-model="startDate" mask="DD/MM/YYYY">
+                        <div class="row items-center justify-end">
+                          <q-btn v-close-popup :label="t('common.close')" color="primary" flat />
+                        </div>
+                      </q-date>
+                    </q-popup-proxy>
+                  </q-icon>
+                </template>
+              </q-input>
+            </div>
+            <div class="col-6 col-md-2">
+              <div class="text-caption text-weight-bold q-mb-xs">{{ t('prodPlan.finishDate') }}</div>
+              <q-input outlined v-model="finishDate" dense bg-color="white" mask="##/##/####" placeholder="DD/MM/YYYY">
+                <template v-slot:append>
+                  <q-icon name="event" class="cursor-pointer">
+                    <q-popup-proxy cover transition-show="scale" transition-hide="scale">
+                      <q-date v-model="finishDate" mask="DD/MM/YYYY">
+                        <div class="row items-center justify-end">
+                          <q-btn v-close-popup :label="t('common.close')" color="primary" flat />
+                        </div>
+                      </q-date>
+                    </q-popup-proxy>
+                  </q-icon>
+                </template>
+              </q-input>
+            </div>
+          </div>
+
+          <!-- Form Row 2: Plant, Volume & Batches -->
+          <div class="row q-col-gutter-md">
+            <div class="col-12 col-md-3">
+              <div class="text-caption text-weight-bold q-mb-xs">{{ t('prodPlan.plant') }}</div>
+              <q-select
+                outlined v-model="plant" :options="plantOptions"
+                dense bg-color="white" emit-value map-options
+              >
+                <template v-slot:append>
+                  <q-btn icon="settings" flat round dense size="sm" color="primary" @click="$router.push({ name: 'PlantConfig' })" />
+                </template>
+              </q-select>
+            </div>
+            <div class="col-6 col-md-2">
+              <div class="text-caption text-weight-bold q-mb-xs">{{ t('prodPlan.requireVol') }}</div>
+              <q-input outlined v-model="productionRequire" type="number" dense bg-color="white" input-class="text-right" />
+            </div>
+            <div class="col-6 col-md-2">
+              <div class="text-caption text-weight-bold q-mb-xs">{{ t('prodPlan.batchStandard') }}</div>
+              <q-input outlined v-model="batchStandard" type="number" dense bg-color="white" input-class="text-right" />
+            </div>
+            <div class="col-6 col-md-2">
+              <div class="text-caption text-weight-bold q-mb-xs">{{ t('prodPlan.totalPlanVol') }}</div>
+              <q-input outlined :model-value="totalPlanVolume" readonly dense bg-color="grey-2" input-class="text-right text-weight-bold" />
+            </div>
+            <div class="col-6 col-md-1">
+              <div class="text-caption text-weight-bold q-mb-xs">{{ t('prodPlan.numBatches') }}</div>
+              <q-input outlined v-model="numberOfBatch" type="number" dense bg-color="white" @update:model-value="onManualBatchChange" input-class="text-center" />
+            </div>
+          </div>
+        </q-card-section>
+      </q-card>
+
+      <!-- ═══ Plans Master ═══ -->
+      <div class="row items-center justify-between q-mb-xs q-px-sm" style="min-height:36px;">
+        <div class="text-subtitle2 text-weight-bold">Plans Master</div>
+        <div class="row items-center q-gutter-x-none">
+          <!-- Expand/Collapse -->
+          <q-btn icon="unfold_more" flat round dense size="sm" color="blue-grey-7" @click="expandAll">
+            <q-tooltip>Expand All</q-tooltip>
+          </q-btn>
+          <q-btn icon="unfold_less" flat round dense size="sm" color="blue-grey-7" @click="collapseAll">
+            <q-tooltip>Collapse All</q-tooltip>
+          </q-btn>
+          <q-separator vertical inset class="q-mx-xs" />
+          <!-- Refresh -->
+          <q-btn icon="refresh" flat round dense size="sm" color="blue-grey-7" @click="fetchPlans">
+            <q-tooltip>Refresh</q-tooltip>
+          </q-btn>
+          <!-- Filter toggle -->
+          <q-btn :icon="showFilter ? 'filter_list_off' : 'filter_list'" flat round dense size="sm" :color="showFilter ? 'primary' : 'blue-grey-7'" @click="showFilter = !showFilter">
+            <q-tooltip>{{ showFilter ? 'Hide Filter' : 'Filter' }}</q-tooltip>
+          </q-btn>
+          <!-- Clear filter -->
+          <q-btn v-if="filterText" icon="filter_alt_off" flat round dense size="sm" color="red" @click="filterText = ''">
+            <q-tooltip>Clear Filter</q-tooltip>
+          </q-btn>
+          <!-- Print Report -->
+          <q-btn icon="print" flat round dense size="sm" color="blue-grey-7" @click="printAllPlans">
+            <q-tooltip>Print Plan Report</q-tooltip>
+          </q-btn>
+          <q-separator vertical inset class="q-mx-xs" />
+          <!-- Show All toggle -->
+          <q-btn :icon="showAll ? 'visibility' : 'visibility_off'" flat round dense size="sm" :color="showAll ? 'primary' : 'blue-grey-7'" @click="showAll = !showAll">
+            <q-tooltip>{{ showAll ? 'Showing All' : 'Active Only' }}</q-tooltip>
+          </q-btn>
+          <q-separator vertical inset class="q-mx-xs" />
+          <!-- Per Page -->
+          <q-select
+            v-model="plansPerPage"
+            :options="[5, 10, 20, 50]"
+            dense borderless
+            style="min-width: 45px; max-width: 55px;"
+            class="text-caption"
+          />
+          <!-- Pagination -->
+          <q-btn icon="chevron_left" flat round dense size="sm" :disable="currentPage <= 1" @click="currentPage--">
+            <q-tooltip>Previous Page</q-tooltip>
+          </q-btn>
+          <span class="text-caption text-weight-medium" style="min-width:40px; text-align:center;">{{ currentPage }}/{{ totalPages }}</span>
+          <q-btn icon="chevron_right" flat round dense size="sm" :disable="currentPage >= totalPages" @click="currentPage++">
+            <q-tooltip>Next Page</q-tooltip>
+          </q-btn>
+        </div>
+      </div>
+
+      <!-- Filter bar (toggled) -->
+      <div v-if="showFilter" class="q-mb-xs q-px-sm">
+        <q-input v-model="filterText" dense outlined clearable placeholder="Search plans (ID, SKU, Plant, Status...)" bg-color="white" style="max-width: 400px;">
+          <template v-slot:prepend><q-icon name="search" /></template>
+        </q-input>
+      </div>
+
+      <q-card flat bordered class="shadow-1 overflow-hidden" style="border-radius: 8px;">
+        <q-table
+          :rows="filteredPlans"
+          :columns="columns"
+          row-key="id"
+          flat
+          dense
+          class="text-caption sticky-header-table"
+          :pagination="{ rowsPerPage: 0 }"
+          hide-bottom
+          style="max-height: calc(100vh - 350px);"
+          v-model:expanded="expandedRows"
+        >
+          <template v-slot:header="props">
+            <q-tr :props="props" class="bg-blue-grey-2">
+              <q-th auto-width />
+              <q-th v-for="col in props.cols" :key="col.name" :props="props" class="text-weight-bold">
+                {{ col.label }}
+              </q-th>
+            </q-tr>
+            <!-- Summary Row -->
+            <q-tr class="bg-blue-1">
+              <q-td auto-width />
+              <q-td v-for="col in props.cols" :key="'sum-' + col.name" class="text-weight-bold text-blue-9" style="font-size:0.8rem;">
+                <template v-if="col.name === 'plan_id'">Total ({{ planSummary.count }})</template>
+                <template v-else-if="col.name === 'total_volume'"><div class="text-right">{{ planSummary.total_volume.toLocaleString() }}</div></template>
+                <template v-else-if="col.name === 'num_batches'"><div class="text-center">{{ planSummary.num_batches }}</div></template>
+              </q-td>
+            </q-tr>
+          </template>
+
+          <template v-slot:body="props">
+            <q-tr :props="props" class="cursor-pointer hover-bg" @click="props.expand = !props.expand">
+              <q-td auto-width>
+                <q-btn size="sm" color="primary" round flat dense @click.stop="props.expand = !props.expand"
+                  :icon="props.expand ? 'keyboard_arrow_down' : 'keyboard_arrow_right'" />
+              </q-td>
+              <q-td v-for="col in props.cols" :key="col.name" :props="props">
+                <!-- Plan ID: show 2-line card -->
+                <template v-if="col.name === 'plan_id'">
+                  <div>
+                    <span class="text-weight-bolder text-blue-9">{{ props.row.plan_id }}</span>
+                    <span class="text-grey-7 q-ml-sm">»</span>
+                    <span class="text-weight-medium q-ml-sm">{{ props.row.sku_name || props.row.sku_id }}</span>
+                  </div>
+                  <div class="q-mt-xs row items-center q-gutter-x-sm">
+                    <q-badge :color="props.row.status === 'Cancelled' ? 'red' : props.row.status === 'Planned' ? 'blue' : 'green'" text-color="white" class="text-weight-bold" style="font-size:0.7rem;">
+                      {{ props.row.status }}
+                    </q-badge>
+                    <span class="text-caption text-grey-8">
+                      {{ getBatchStats(props.row).total }} Batches
+                      <template v-if="getBatchStats(props.row).total > 0">
+                        —
+                        <span class="text-weight-bold" :class="getBatchStats(props.row).fh === getBatchStats(props.row).total ? 'text-positive' : 'text-grey-7'">FH {{ getBatchStats(props.row).fh }}/{{ getBatchStats(props.row).total }}</span>
+                        <span class="text-weight-bold q-ml-xs" :class="getBatchStats(props.row).spp === getBatchStats(props.row).total ? 'text-positive' : 'text-grey-7'">SPP {{ getBatchStats(props.row).spp }}/{{ getBatchStats(props.row).total }}</span>
+                        <span class="text-weight-bold q-ml-xs" :class="getBatchStats(props.row).recheck === getBatchStats(props.row).total ? 'text-positive' : 'text-grey-7'">ReCheck {{ getBatchStats(props.row).recheck }}/{{ getBatchStats(props.row).total }}</span>
+                        <span class="text-weight-bold q-ml-xs" :class="getBatchStats(props.row).ready === getBatchStats(props.row).total ? 'text-positive' : 'text-grey-7'">Ready {{ getBatchStats(props.row).ready }}/{{ getBatchStats(props.row).total }}</span>
+                        <span class="text-weight-bold q-ml-xs" :class="getBatchStats(props.row).prod === getBatchStats(props.row).total ? 'text-positive' : 'text-grey-7'">Prod {{ getBatchStats(props.row).prod }}/{{ getBatchStats(props.row).total }}</span>
+                        <span class="text-weight-bold q-ml-xs" :class="getBatchStats(props.row).done === getBatchStats(props.row).total ? 'text-positive' : 'text-grey-7'">Done {{ getBatchStats(props.row).done }}/{{ getBatchStats(props.row).total }}</span>
+                      </template>
+                    </span>
+                  </div>
+                </template>
+                <template v-else-if="col.name === 'plant'">
+                  <span class="text-weight-medium">{{ plantNames[props.row.plant] || props.row.plant }}</span>
+                </template>
+                <template v-else-if="col.name === 'total_volume'">
+                  <span class="text-weight-bold">{{ props.row.total_volume?.toLocaleString() }}</span>
+                </template>
+                <template v-else-if="col.name === 'status'">
+                  <q-badge :color="props.row.status === 'Cancelled' ? 'red' : props.row.status === 'Planned' ? 'blue' : 'green'" text-color="white" class="text-weight-bold">
+                    {{ props.row.status }}
+                  </q-badge>
+                </template>
+                <template v-else-if="col.name === 'actions'">
+                  <q-btn icon="more_vert" flat round dense size="sm" color="grey-7" @click.stop>
+                    <q-menu auto-close>
+                      <q-list dense style="min-width:140px">
+                        <q-item clickable @click="printPlan(props.row)"><q-item-section avatar><q-icon name="print" color="primary" /></q-item-section><q-item-section>Print</q-item-section></q-item>
+                        <q-item clickable @click="showHistory(props.row)"><q-item-section avatar><q-icon name="history" color="primary" /></q-item-section><q-item-section>History</q-item-section></q-item>
+                        <q-separator />
+                        <q-item clickable @click="onCancelPlan(props.row)" :disable="props.row.status === 'Cancelled'"><q-item-section avatar><q-icon name="cancel" color="negative" /></q-item-section><q-item-section class="text-negative">Cancel</q-item-section></q-item>
+                      </q-list>
+                    </q-menu>
+                  </q-btn>
+                </template>
+                <template v-else>{{ col.value }}</template>
+              </q-td>
+            </q-tr>
+
+            <!-- ══ Expanded: Plant Detail + Ingredients + Batches ══ -->
+            <q-tr v-show="props.expand" :props="props" class="bg-blue-grey-1">
+              <q-td colspan="100%" class="q-pa-sm">
+                <!-- > Plant Detail -->
+                <div class="q-pa-xs q-px-sm q-mb-sm" style="background:#e3f2fd; border-radius:6px; border-left:4px solid #1565c0;">
+                  <div class="row q-col-gutter-lg text-caption">
+                    <div class="col-auto"><strong>SKU:</strong> {{ props.row.sku_id }} — {{ props.row.sku_name }}</div>
+                    <div class="col-auto"><strong>Plant:</strong> {{ plantNames[props.row.plant] || props.row.plant }}</div>
+                    <div class="col-auto"><strong>Batch Size:</strong> {{ props.row.batch_size }} kg</div>
+                  </div>
+                </div>
+
+                <div class="row q-col-gutter-md">
+                  <!-- >> Require Ingredient -->
+                  <div class="col-12 col-md-5" style="max-height:400px; overflow-y:auto;">
+                    <div class="text-caption text-weight-bold q-mb-xs" style="color:#37474f;">
+                      <q-icon name="science" size="xs" class="q-mr-xs" />Require Ingredients
+                    </div>
+                    <div v-if="getPlanIngredients(props.row).length === 0" class="text-center q-pa-md text-grey-6">
+                      <q-icon name="info" size="sm" class="q-mr-xs" /><span class="text-caption">No ingredients</span>
+                    </div>
+                    <template v-else>
+                      <template v-for="whGroup in getIngredientsByWarehouse(props.row)" :key="whGroup.wh">
+                        <div class="q-pa-xs q-px-sm text-white text-weight-bold row items-center justify-between cursor-pointer"
+                          :style="{ background: whGroup.wh === 'MIX' ? '#7b1fa2' : whGroup.wh === 'FH' ? '#1565c0' : '#00897b', borderRadius: isWhCollapsed(props.row.plan_id, whGroup.wh) ? '4px' : '4px 4px 0 0', fontSize:'0.72rem', marginTop:'4px' }"
+                          @click="toggleWh(props.row.plan_id, whGroup.wh)">
+                          <span>
+                            <q-icon :name="isWhCollapsed(props.row.plan_id, whGroup.wh) ? 'chevron_right' : 'expand_more'" size="xs" class="q-mr-none" />
+                            <q-icon :name="whGroup.wh === 'MIX' ? 'blender' : whGroup.wh === 'FH' ? 'science' : 'inventory_2'" size="xs" class="q-mr-xs" />{{ whGroup.wh }} ({{ whGroup.items.length }})
+                          </span>
+                          <span>{{ whGroup.items.reduce((s: number, i: any) => s + i.vol_per_batch, 0).toFixed(2) }} /batch &nbsp;|&nbsp; {{ whGroup.totalVol.toFixed(2) }} kg</span>
+                        </div>
+                        <table v-show="!isWhCollapsed(props.row.plan_id, whGroup.wh)" style="width:100%; border-collapse:collapse; font-size:0.7rem; margin-bottom:2px; table-layout:fixed;"
+                          :style="{ borderLeft:'3px solid ' + (whGroup.wh === 'MIX' ? '#7b1fa2' : whGroup.wh === 'FH' ? '#1565c0' : '#00897b') }">
+                          <colgroup>
+                            <col style="width:22%">
+                            <col style="width:38%">
+                            <col style="width:20%">
+                            <col style="width:20%">
+                          </colgroup>
+                          <thead><tr style="background:#f5f5f5;"><th style="padding:2px 4px; text-align:left;">RE Code</th><th style="padding:2px 4px; text-align:left;">Name</th><th style="padding:2px 4px; text-align:right;">Vol/Batch</th><th style="padding:2px 4px; text-align:right;">Total</th></tr></thead>
+                          <tbody>
+                            <tr v-for="ing in whGroup.items" :key="ing.re_code" style="border-bottom:1px solid #eee;">
+                              <td style="padding:2px 4px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" :style="{ color: whGroup.wh === 'MIX' ? '#7b1fa2' : whGroup.wh === 'FH' ? '#1565c0' : '#00897b' }">{{ ing.re_code }}</td>
+                              <td style="padding:2px 4px; color:#555; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{{ ing.name }}</td>
+                              <td style="padding:2px 4px; text-align:right; font-family:monospace;">{{ ing.vol_per_batch.toFixed(4) }}</td>
+                              <td style="padding:2px 4px; text-align:right; font-weight:700; font-family:monospace;">{{ ing.total_vol.toFixed(4) }}</td>
+                            </tr>
+                          </tbody>
+                          <tfoot>
+                            <tr style="border-top:2px solid #ccc; background:#f0f0f0;">
+                              <td colspan="2" style="padding:2px 4px; font-weight:700; font-size:0.68rem;">Subtotal ({{ whGroup.items.length }})</td>
+                              <td style="padding:2px 4px; text-align:right; font-weight:700; font-family:monospace;">{{ whGroup.items.reduce((s: number, i: any) => s + i.vol_per_batch, 0).toFixed(4) }}</td>
+                              <td style="padding:2px 4px; text-align:right; font-weight:700; font-family:monospace;">{{ whGroup.totalVol.toFixed(4) }}</td>
+                            </tr>
+                          </tfoot>
+                        </table>
+                      </template>
+                      <div class="q-pa-xs q-px-sm text-weight-bold row justify-between" style="background:#263238; color:#fff; border-radius:0 0 4px 4px; font-size:0.72rem; margin-top:2px;">
+                        <span>Grand Total: {{ getPlanIngredients(props.row).length }} items</span>
+                        <span style="font-family:monospace;">
+                          {{ getPlanIngredients(props.row).reduce((s: number, i: any) => s + i.vol_per_batch, 0).toFixed(4) }} / batch
+                          &nbsp;|&nbsp;
+                          {{ getPlanIngredients(props.row).reduce((s: number, i: any) => s + i.total_vol, 0).toFixed(4) }} kg total
+                        </span>
+                      </div>
+                    </template>
+                  </div>
+
+                  <!-- > Batch List -->
+                  <div class="col-12 col-md-7">
+                    <div class="text-caption text-weight-bold q-mb-xs text-blue-9">
+                      <q-icon name="list_alt" size="xs" class="q-mr-xs" />Batch List ({{ (props.row.batches || []).length }})
+                    </div>
+                    <template v-if="props.row.batches && props.row.batches.length > 0">
+                      <q-table :rows="props.row.batches" :columns="batchColumns" row-key="batch_id" flat dense
+                        :pagination="{ rowsPerPage: 20 }" class="bg-white shadow-1"
+                        style="border-radius:6px; border:1px solid #e0e0e0; max-height:380px; overflow-y:auto;">
+                        <template v-slot:header="batchProps">
+                          <q-tr :props="batchProps" class="bg-grey-2">
+                            <q-th v-for="col in batchProps.cols" :key="col.name" :props="batchProps" class="text-weight-bold">{{ col.label }}</q-th>
+                          </q-tr>
+                        </template>
+                        <template v-slot:body="batchProps">
+                          <q-tr :props="batchProps" class="hover-bg">
+                            <q-td v-for="col in batchProps.cols" :key="col.name" :props="batchProps">
+                              <template v-if="['flavour_house','spp','batch_prepare','ready_to_product','production','done'].includes(col.name)">
+                                <!-- Green = Packing/Production done (Ready, Prod, Done) -->
+                                <q-icon v-if="col.value && ['ready_to_product','production','done'].includes(col.name)" name="check_circle" color="positive" size="xs" />
+                                <!-- Yellow = Pre-batch Packing done (FH, SPP, ReCheck) -->
+                                <q-icon v-else-if="col.value && ['flavour_house','spp','batch_prepare'].includes(col.name)" name="check_circle" color="amber" size="xs" />
+                                <!-- Gray = Created / not done -->
+                                <q-icon v-else name="radio_button_unchecked" color="grey-4" size="xs" />
+                              </template>
+                              <template v-else-if="col.name === 'batch_id'">
+                                <span class="text-weight-medium text-blue-8">{{ batchProps.row.batch_id }}</span>
+                              </template>
+                              <template v-else-if="col.name === 'status'">
+                                <q-badge :color="batchProps.row.status === 'Cancelled' ? 'red' : ['Draft','Pending','Created'].includes(batchProps.row.status) ? 'grey-6' : 'green'" text-color="white" class="text-weight-bold">{{ batchProps.row.status }}</q-badge>
+                              </template>
+                              <template v-else>{{ col.value }}</template>
+                            </q-td>
+                          </q-tr>
+                        </template>
+                      </q-table>
+                    </template>
+                    <div v-else class="text-caption text-grey-7 q-py-sm">No batches</div>
+                  </div>
+                </div>
+              </q-td>
+            </q-tr>
+          </template>
+        </q-table>
+      </q-card>
+
+
+    <!-- Cancel Plan Dialog -->
+    <q-dialog v-model="showCancelDialog" persistent>
+      <q-card style="min-width: 420px;">
+        <q-card-section class="bg-negative text-white">
+          <div class="text-h6 row items-center q-gutter-sm">
+            <q-icon name="cancel" size="sm" />
+            <span>{{ t('prodPlan.cancelConfirmTitle') }}</span>
+          </div>
+        </q-card-section>
+
+        <q-card-section class="q-pt-md">
+          <p class="text-body2 q-mb-md">{{ t('prodPlan.cancelConfirmMessage') }}</p>
+
+          <div class="text-caption text-weight-bold q-mb-xs">{{ t('prodPlan.cancelReasonLabel') }}</div>
+          <q-select
+            v-model="cancelReason"
+            :options="cancelReasonOptions"
+            outlined
+            dense
+            emit-value
+            map-options
+            class="q-mb-md"
+          />
+
+          <template v-if="cancelReason === 'Other'">
+            <div class="text-caption text-weight-bold q-mb-xs">{{ t('prodPlan.cancelCustomReason', 'Specify reason') }}</div>
+            <q-input
+              v-model="cancelCustomReason"
+              outlined
+              dense
+              autofocus
+              type="textarea"
+              rows="2"
+            />
+          </template>
+        </q-card-section>
+
+        <q-card-actions align="right" class="q-pa-md">
+          <q-btn flat :label="t('common.cancel', 'Cancel')" color="grey-7" v-close-popup />
+          <q-btn
+            unelevated
+            :label="t('prodPlan.confirmCancel', 'Confirm Cancel')"
+            color="negative"
+            :disable="!cancelReason"
+            @click="confirmCancelPlan"
+          />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
+
+
+    <!-- Daily Report Dialog -->
+    <q-dialog v-model="showDailyReportDialog">
+      <q-card style="min-width: 380px;">
+        <q-card-section class="bg-primary text-white">
+          <div class="text-h6"><q-icon name="assessment" class="q-mr-sm" />Production Daily Report</div>
+          <div class="text-caption">Select date for the report</div>
+        </q-card-section>
+        <q-card-section>
+          <q-input v-model="dailyReportDate" label="Date" filled mask="##/##/####" fill-mask>
+            <template #append>
+              <q-icon name="event" class="cursor-pointer">
+                <q-popup-proxy cover transition-show="scale" transition-hide="scale">
+                  <q-date v-model="dailyReportDate" mask="DD/MM/YYYY" />
+                </q-popup-proxy>
+              </q-icon>
+            </template>
+          </q-input>
+        </q-card-section>
+        <q-card-actions align="right">
+          <q-btn flat label="Cancel" v-close-popup />
+          <q-btn color="primary" icon="print" label="Generate Report" :loading="dailyReportLoading" @click="printDailyReport" />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
+
+    </q-page>
+  </RouterView>
+</template>
+
+<style scoped>
+.text-magenta {
+  color: #ff00ff;
+}
+.custom-table-border {
+  border: 1px solid #777;
+  border-radius: 8px;
+}
+</style>

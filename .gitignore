@@ -1,0 +1,44 @@
+# Dependencies
+node_modules/
+.nuxt/
+.nuxt_bk/
+.output/
+venv/
+__pycache__/
+*.pyc
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Database
+*.db
+*.sqlite3
+
+# Logs
+*.log
+erl_crash.dump
+
+# RabbitMQ data
+x03-locMqtt/rabbitmq-data/
+
+# Node-RED data
+x03-locMqtt/x99_env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build
+dist/
+build/
+
+# Package lock (optional — remove this line if you want to track it)
+# package-lock.json

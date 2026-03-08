@@ -1,0 +1,19 @@
+[Unit]
+Description=Scale Reader (RS-232 to MQTT) for x2512001-mitrPhol
+After=network.target docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+User=x-root
+WorkingDirectory=/home/x-root/xApp/x2512001-mitrPhol/x04-scaleRead
+ExecStart=/usr/bin/python3 -u /home/x-root/xApp/x2512001-mitrPhol/x04-scaleRead/scale_read.py
+Restart=always
+RestartSec=5
+Environment=MQTT_BROKER=localhost
+Environment=MQTT_PORT=1883
+Environment=MQTT_USER=xMixingNode-1
+Environment=MQTT_PASS=x123456
+
+[Install]
+WantedBy=multi-user.target
