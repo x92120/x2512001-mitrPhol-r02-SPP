@@ -307,7 +307,7 @@ class ProductionBatch(Base):
     plan = relationship("ProductionPlan", back_populates="batches")
 
 
-# ── PreBatch ─────────────────────────────────────────────────────────────────
+# ── PreBatch (Legacy — kept for backward compat) ─────────────────────────────
 
 class PreBatchReq(Base):
     __tablename__ = "prebatch_reqs"
@@ -352,6 +352,63 @@ class PreBatchRec(Base):
     origins = relationship("PreBatchRecFrom", back_populates="prebatch_rec", cascade="all, delete-orphan")
 
 
+# ── PreBatch Unified (NEW — replaces reqs + recs) ────────────────────────────
+
+class PreBatchItem(Base):
+    """Unified prebatch table: one row per batch×ingredient.
+    Packing fields are NULL until the operator weighs on the scale."""
+    __tablename__ = "prebatch_items"
+    id = Column(Integer, primary_key=True, index=True)
+    # Requirement fields (filled at plan creation)
+    batch_db_id = Column(Integer, ForeignKey("production_batches.id"), nullable=False)
+    plan_id = Column(String(50), index=True)
+    batch_id = Column(String(100), index=True)
+    re_code = Column(String(50), index=True)
+    ingredient_name = Column(String(200))
+    required_volume = Column(Float)
+    wh = Column(String(50), default="Mix")
+    status = Column(Integer, default=0)  # 0=Wait, 1=Batch, 2=Done
+    # Packing fields (filled when operator weighs — NULL until then)
+    batch_record_id = Column(String(100), index=True)
+    net_volume = Column(Float)
+    package_no = Column(Integer, default=1)
+    total_packages = Column(Integer, default=1)
+    intake_lot_id = Column(String(50), index=True)
+    mat_sap_code = Column(String(50), index=True)
+    prebatch_id = Column(String(100))
+    recode_batch_id = Column(String(50))
+    total_volume = Column(Float)
+    total_request_volume = Column(Float)
+    # QC Recheck
+    recheck_status = Column(Integer, default=0)   # 0=Pending, 1=OK, 2=Error
+    recheck_at = Column(TIMESTAMP, nullable=True)
+    recheck_by = Column(String(100), nullable=True)
+    # Box Packing
+    packing_status = Column(Integer, default=0)    # 0=Open, 1=Packed
+    packed_at = Column(TIMESTAMP, nullable=True)
+    packed_by = Column(String(50), nullable=True)
+    # Timestamps
+    weighed_at = Column(TIMESTAMP, nullable=True)
+    created_at = Column(TIMESTAMP, server_default=text("CURRENT_TIMESTAMP"))
+    updated_at = Column(TIMESTAMP, server_default=text("CURRENT_TIMESTAMP"), onupdate=func.now())
+    # Relationships
+    batch = relationship("ProductionBatch", backref="items")
+    origins = relationship("PreBatchItemFrom", back_populates="prebatch_item", cascade="all, delete-orphan")
+
+
+class PreBatchItemFrom(Base):
+    """Multi-lot origins for a prebatch item (which raw material lots were used)."""
+    __tablename__ = "prebatch_item_from"
+    id = Column(Integer, primary_key=True, index=True)
+    prebatch_item_id = Column(Integer, ForeignKey("prebatch_items.id"), nullable=False, index=True)
+    intake_lot_id = Column(String(50), nullable=False, index=True)
+    mat_sap_code = Column(String(50), index=True)
+    take_volume = Column(Float, nullable=False)
+    created_at = Column(TIMESTAMP, server_default=text("CURRENT_TIMESTAMP"))
+    prebatch_item = relationship("PreBatchItem", back_populates="origins")
+
+
+# Legacy origin table (kept for backward compat)
 class PreBatchRecFrom(Base):
     __tablename__ = "prebatch_rec_from"
     id = Column(Integer, primary_key=True, index=True)

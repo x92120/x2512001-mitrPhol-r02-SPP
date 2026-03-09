@@ -41,7 +41,7 @@ export function usePreBatchIngredients(deps: IngredientDeps) {
     // --- Functions ---
     const fetchPrebatchItems = async (batchId: string) => {
         try {
-            const data = await $fetch<any[]>(`${appConfig.apiBaseUrl}/prebatch-reqs/by-batch/${batchId}`, {
+            const data = await $fetch<any[]>(`${appConfig.apiBaseUrl}/prebatch-items/by-batch/${batchId}`, {
                 headers: getAuthHeader() as Record<string, string>
             })
             prebatchItems.value = data
@@ -55,7 +55,7 @@ export function usePreBatchIngredients(deps: IngredientDeps) {
         try {
             const req = prebatchItems.value.find((r: any) => r.re_code === reCode)
             if (!req) return
-            await $fetch(`${appConfig.apiBaseUrl}/prebatch-reqs/${req.id}/status?status=${status}`, {
+            await $fetch(`${appConfig.apiBaseUrl}/prebatch-items/${req.id}/status?status=${status}`, {
                 method: 'PUT',
                 headers: getAuthHeader() as Record<string, string>
             })
@@ -141,7 +141,7 @@ export function usePreBatchIngredients(deps: IngredientDeps) {
         if (!deps.selectedProductionPlan.value) return
         try {
             const data = await $fetch<any[]>(
-                `${appConfig.apiBaseUrl}/prebatch-reqs/batches-by-ingredient/${deps.selectedProductionPlan.value}/${encodeURIComponent(reCode)}`,
+                `${appConfig.apiBaseUrl}/prebatch-items/batches-by-ingredient/${deps.selectedProductionPlan.value}/${encodeURIComponent(reCode)}`,
                 { headers: getAuthHeader() as Record<string, string> }
             )
             ingredientBatchDetail.value[reCode] = data

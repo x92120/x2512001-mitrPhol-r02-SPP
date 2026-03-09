@@ -72,9 +72,9 @@ export function usePreBatchProduction(deps: ProductionDeps) {
 
     const plansWithBatches = computed(() => {
         return filteredProductionPlans.value.map(plan => {
-            const childBatches = (allBatches.value || [])
-                .filter(b => b.plan_id === plan.id || b.batch_id.includes(plan.plan_id))
-                .sort((a: any, b: any) => a.batch_id.localeCompare(b.batch_id))
+            // Use batches already embedded from production-plans API response
+            const childBatches = (plan.batches || allBatches.value.filter((b: any) => b.batch_id?.includes(plan.plan_id)))
+                .sort((a: any, b: any) => (a.batch_id || '').localeCompare(b.batch_id || ''))
             return { ...plan, batches: childBatches }
         })
     })
@@ -102,9 +102,8 @@ export function usePreBatchProduction(deps: ProductionDeps) {
             if (!groups[sku]) {
                 groups[sku] = { sku, plans: [] }
             }
-            const childBatches = (allBatches.value || [])
-                .filter(b => b.plan_id === plan.id || b.batch_id.includes(plan.plan_id))
-                .sort((a: any, b: any) => a.batch_id.localeCompare(b.batch_id))
+            const childBatches = (plan.batches || [])
+                .sort((a: any, b: any) => (a.batch_id || '').localeCompare(b.batch_id || ''))
             groups[sku].plans.push({ ...plan, batches: childBatches })
         })
         return Object.values(groups).sort((a: any, b: any) => a.sku.localeCompare(b.sku))
@@ -128,7 +127,13 @@ export function usePreBatchProduction(deps: ProductionDeps) {
             const resp = await $fetch<any>(`${appConfig.apiBaseUrl}/production-plans/?status=active`, {
                 headers: getAuthHeader() as Record<string, string>
             })
-            productionPlans.value = resp.plans || resp || []
+            const plans = resp.plans || resp || []
+            productionPlans.value = plans
+            // Also populate allBatches from embedded data to avoid separate fetch
+            const embeddedBatches = plans.flatMap((p: any) => p.batches || [])
+            if (embeddedBatches.length > 0) {
+                allBatches.value = embeddedBatches
+            }
         } catch (error) {
             console.error('Error fetching production plans:', error)
             $q.notify({ type: 'negative', message: t('preBatch.errorLoadingPlans'), position: 'top' })
@@ -173,7 +178,7 @@ export function usePreBatchProduction(deps: ProductionDeps) {
         deps.selectedReCode.value = ''
         deps.selectedRequirementId.value = null
         try {
-            const data = await $fetch<any[]>(`${appConfig.apiBaseUrl}/prebatch-reqs/summary-by-plan/${plan.plan_id}`, {
+            const data = await $fetch<any[]>(`${appConfig.apiBaseUrl}/prebatch-items/summary-by-plan/${plan.plan_id}`, {
                 headers: getAuthHeader() as Record<string, string>
             })
             deps.prebatchItems.value = data.map((item: any) => ({
@@ -206,7 +211,7 @@ export function usePreBatchProduction(deps: ProductionDeps) {
 
     const onBatchExpand = async (batch: any) => {
         try {
-            const data = await $fetch<any[]>(`${appConfig.apiBaseUrl}/prebatch-reqs/by-batch/${batch.batch_id}`, {
+            const data = await $fetch<any[]>(`${appConfig.apiBaseUrl}/prebatch-items/by-batch/${batch.batch_id}`, {
                 headers: getAuthHeader() as Record<string, string>
             })
             batchIngredients.value[batch.batch_id] = data.map((req: any) => {

@@ -388,7 +388,7 @@ onMounted(() => {
       <div class="col-12 col-md-4 column q-gutter-y-sm" style="height: calc(100vh - 140px);">
 
         <!-- CARD 1: Production Plans with expandable Batches -->
-        <q-card class="col column bg-white shadow-2" style="max-height: 40vh;">
+        <q-card class="bg-white shadow-2 column" style="flex-shrink: 0;">
           <q-card-section class="bg-blue-9 text-white q-py-xs">
             <div class="row items-center justify-between no-wrap q-gutter-x-sm">
               <div class="row items-center no-wrap">
@@ -434,7 +434,7 @@ onMounted(() => {
               </div>
             </div>
           </q-card-section>
-          <div class="col relative-position">
+          <div class="relative-position" style="height: 200px; overflow: hidden;">
             <q-scroll-area class="fit">
               <template v-if="plansWithBatches.length > 0">
                 <q-list dense separator class="text-caption">
@@ -472,7 +472,7 @@ onMounted(() => {
 
 
         <!-- CARD 2: Ingredients for Selected Plan -->
-        <q-card class="col-auto bg-white shadow-2 column" style="max-height: 400px;">
+        <q-card class="col bg-white shadow-2 column" style="min-height: 0;">
             <q-card-section class="bg-blue-grey-2 q-py-xs">
                 <div class="row items-center justify-between no-wrap">
                     <div class="text-subtitle2 text-weight-bold text-blue-grey-8 row items-center no-wrap">
@@ -619,8 +619,11 @@ onMounted(() => {
                                                         </td>
                                                     </tr>
                                                 </template>
-                                                <tr v-if="!ingredientBatchDetail[ing.re_code] || ingredientBatchDetail[ing.re_code]?.length === 0">
+                                                <tr v-if="!ingredientBatchDetail[ing.re_code]">
                                                     <td colspan="5" class="text-center text-grey text-italic">Loading...</td>
+                                                </tr>
+                                                <tr v-else-if="ingredientBatchDetail[ing.re_code]?.length === 0">
+                                                    <td colspan="5" class="text-center text-grey text-italic">No batch data</td>
                                                 </tr>
                                             </tbody>
                                         </q-markup-table>

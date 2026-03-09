@@ -392,9 +392,13 @@ def get_prebatch_reqs_summary_by_plan(plan_id: str, db: Session = Depends(get_db
     
     return list(summary.values())
 
-@router.get("/prebatch-reqs/batches-by-ingredient/{plan_id}/{re_code}")
+@router.get("/prebatch-reqs/batches-by-ingredient/{plan_id}/{re_code:path}")
 def get_batches_for_ingredient(plan_id: str, re_code: str, db: Session = Depends(get_db)):
-    """Get per-batch detail for a specific ingredient within a plan."""
+    """Get per-batch detail for a specific ingredient within a plan.
+    Uses :path converter to allow slashes in re_code (e.g. 'Malic Acid, 25 kgs/bag.')."""
+    from urllib.parse import unquote
+    re_code = unquote(re_code)
+    
     reqs = db.query(models.PreBatchReq).filter(
         models.PreBatchReq.plan_id == plan_id,
         models.PreBatchReq.re_code == re_code
@@ -503,6 +507,262 @@ def update_packing_status(record_id: int, data: PackingStatusUpdate, db: Session
         "packed_at": rec.packed_at,
         "packed_by": rec.packed_by,
     }
+
+# =============================================================================
+# PREBATCH ITEMS (NEW UNIFIED ENDPOINTS)
+# =============================================================================
+
+@router.get("/prebatch-items/summary-by-plan/{plan_id}")
+def get_prebatch_items_summary(plan_id: str, db: Session = Depends(get_db)):
+    """Ingredient summary across all batches — single GROUP BY query, no N+1."""
+    from sqlalchemy import func as sqfunc
+    rows = db.query(
+        models.PreBatchItem.re_code,
+        models.PreBatchItem.ingredient_name,
+        models.PreBatchItem.wh,
+        models.PreBatchItem.required_volume,  # per-batch amount
+        sqfunc.sum(models.PreBatchItem.required_volume).label("total_required"),
+        sqfunc.sum(models.PreBatchItem.net_volume).label("total_packaged"),
+        sqfunc.count(models.PreBatchItem.id).label("batch_count"),
+        sqfunc.sum(sqfunc.IF(models.PreBatchItem.status == 2, 1, 0)).label("completed_batches"),
+    ).filter(
+        models.PreBatchItem.plan_id == plan_id
+    ).group_by(
+        models.PreBatchItem.re_code,
+        models.PreBatchItem.ingredient_name,
+        models.PreBatchItem.wh,
+        models.PreBatchItem.required_volume,
+    ).all()
+
+    result = []
+    for r in rows:
+        total_req = round(float(r.total_required or 0), 4)
+        total_pkg = round(float(r.total_packaged or 0), 4)
+        batch_count = int(r.batch_count or 0)
+        completed = int(r.completed_batches or 0)
+        
+        if completed >= batch_count and batch_count > 0:
+            status = 2
+        elif completed > 0:
+            status = 1
+        else:
+            status = 0
+
+        result.append({
+            "re_code": r.re_code,
+            "ingredient_name": r.ingredient_name,
+            "total_required": total_req,
+            "total_packaged": total_pkg,
+            "batch_count": batch_count,
+            "per_batch": float(r.required_volume or 0),
+            "wh": r.wh or "-",
+            "status": status,
+            "completed_batches": completed,
+        })
+    return result
+
+
+@router.get("/prebatch-items/batches-by-ingredient/{plan_id}/{re_code:path}")
+def get_items_for_ingredient(plan_id: str, re_code: str, db: Session = Depends(get_db)):
+    """Per-batch detail for an ingredient — single query, no N+1."""
+    from urllib.parse import unquote
+    re_code = unquote(re_code)
+    
+    items = db.query(models.PreBatchItem).filter(
+        models.PreBatchItem.plan_id == plan_id,
+        models.PreBatchItem.re_code == re_code
+    ).order_by(models.PreBatchItem.batch_id).all()
+    
+    return [{
+        "batch_id": item.batch_id,
+        "required_volume": item.required_volume or 0,
+        "actual_volume": round(float(item.net_volume or 0), 4),
+        "status": item.status,
+        "req_id": item.id,  # item.id replaces old req.id
+    } for item in items]
+
+
+@router.get("/prebatch-items/by-batch/{batch_id}")
+def get_items_by_batch(batch_id: str, db: Session = Depends(get_db)):
+    """Get all items for a batch — single query."""
+    items = db.query(models.PreBatchItem).filter(
+        models.PreBatchItem.batch_id == batch_id
+    ).all()
+    return [{
+        "id": item.id,
+        "batch_db_id": item.batch_db_id,
+        "plan_id": item.plan_id,
+        "batch_id": item.batch_id,
+        "re_code": item.re_code,
+        "ingredient_name": item.ingredient_name,
+        "required_volume": item.required_volume,
+        "total_packaged": round(float(item.net_volume or 0), 4),
+        "wh": item.wh,
+        "status": item.status,
+    } for item in items]
+
+
+@router.get("/prebatch-items/by-plan/{plan_id}")
+def get_items_by_plan(plan_id: str, wh: Optional[str] = None, db: Session = Depends(get_db)):
+    """Get all items for a plan, optionally filtered by warehouse. Only weighed items."""
+    from sqlalchemy.orm import selectinload
+    query = db.query(models.PreBatchItem).options(
+        selectinload(models.PreBatchItem.origins)
+    ).filter(
+        models.PreBatchItem.plan_id == plan_id,
+        models.PreBatchItem.net_volume.isnot(None),
+    )
+    if wh and wh not in ("All", "All Warehouse"):
+        query = query.filter(models.PreBatchItem.wh == wh)
+    items = query.order_by(models.PreBatchItem.batch_id, models.PreBatchItem.re_code).all()
+    return [schemas.PreBatchItem.model_validate(item) for item in items]
+
+
+@router.put("/prebatch-items/{item_id}/status")
+def update_item_status(item_id: int, status: int, db: Session = Depends(get_db)):
+    """Update item status: 0=Wait, 1=Batch, 2=Done."""
+    item = db.query(models.PreBatchItem).filter(models.PreBatchItem.id == item_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Item not found")
+    item.status = status
+    db.commit()
+    return {"id": item.id, "status": item.status}
+
+
+@router.put("/prebatch-items/{item_id}/pack")
+def pack_item(item_id: int, data: schemas.PreBatchItemPack, db: Session = Depends(get_db)):
+    """Pack (weigh) an item — fills in packing fields on the existing row."""
+    item = db.query(models.PreBatchItem).filter(models.PreBatchItem.id == item_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Item not found")
+
+    # Fill packing fields
+    item.batch_record_id = data.batch_record_id
+    item.net_volume = data.net_volume
+    item.package_no = data.package_no
+    item.total_packages = data.total_packages
+    item.intake_lot_id = data.intake_lot_id
+    item.mat_sap_code = data.mat_sap_code
+    item.recode_batch_id = data.recode_batch_id
+    item.total_volume = item.required_volume
+    item.total_request_volume = item.required_volume
+    item.weighed_at = datetime.now()
+    
+    # Auto-format prebatch_id
+    if item.recode_batch_id and item.re_code and item.batch_id:
+        item.prebatch_id = f"{item.batch_id}{item.re_code}{item.recode_batch_id}"
+
+    # Mark as completed
+    if data.package_no >= data.total_packages:
+        item.status = 2
+    elif item.status == 0:
+        item.status = 1
+
+    # Add origins (lot traceability)
+    if data.origins:
+        for origin in data.origins:
+            db.add(models.PreBatchItemFrom(
+                prebatch_item_id=item.id,
+                intake_lot_id=origin.intake_lot_id,
+                mat_sap_code=origin.mat_sap_code,
+                take_volume=origin.take_volume,
+            ))
+            # Deduct inventory
+            inv = db.query(models.IngredientIntakeList).filter(
+                models.IngredientIntakeList.intake_lot_id == origin.intake_lot_id,
+                models.IngredientIntakeList.re_code == item.re_code,
+            ).first()
+            if inv:
+                inv.remain_vol = (inv.remain_vol or 0) - origin.take_volume
+    elif data.intake_lot_id:
+        inv = db.query(models.IngredientIntakeList).filter(
+            models.IngredientIntakeList.intake_lot_id == data.intake_lot_id,
+            models.IngredientIntakeList.re_code == item.re_code,
+        ).first()
+        if inv:
+            inv.remain_vol = (inv.remain_vol or 0) - (data.net_volume or 0)
+
+    # Auto-finalize batch when all items done
+    batch = db.query(models.ProductionBatch).filter(models.ProductionBatch.id == item.batch_db_id).first()
+    if batch:
+        all_items = db.query(models.PreBatchItem).filter(models.PreBatchItem.batch_db_id == batch.id).all()
+        if all(i.status == 2 for i in all_items):
+            batch.batch_prepare = True
+            if batch.status in ("Created", "In-Progress"):
+                batch.status = "Prepared"
+
+    db.commit()
+    db.refresh(item)
+    return schemas.PreBatchItem.model_validate(item)
+
+
+@router.delete("/prebatch-items/{item_id}/unpack")
+def unpack_item(item_id: int, db: Session = Depends(get_db)):
+    """Unpack (revert) a weighed item — clears packing fields and restores inventory."""
+    item = db.query(models.PreBatchItem).filter(models.PreBatchItem.id == item_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Item not found")
+    
+    # Restore inventory from origins
+    origins = db.query(models.PreBatchItemFrom).filter(
+        models.PreBatchItemFrom.prebatch_item_id == item_id
+    ).all()
+    if origins:
+        for origin in origins:
+            inv = db.query(models.IngredientIntakeList).filter(
+                models.IngredientIntakeList.intake_lot_id == origin.intake_lot_id,
+                models.IngredientIntakeList.re_code == item.re_code,
+            ).first()
+            if inv:
+                inv.remain_vol = (inv.remain_vol or 0) + origin.take_volume
+            db.delete(origin)
+    elif item.intake_lot_id and item.net_volume:
+        inv = db.query(models.IngredientIntakeList).filter(
+            models.IngredientIntakeList.intake_lot_id == item.intake_lot_id,
+            models.IngredientIntakeList.re_code == item.re_code,
+        ).first()
+        if inv:
+            inv.remain_vol = (inv.remain_vol or 0) + item.net_volume
+
+    # Clear packing fields
+    item.batch_record_id = None
+    item.net_volume = None
+    item.package_no = 1
+    item.total_packages = 1
+    item.intake_lot_id = None
+    item.mat_sap_code = None
+    item.prebatch_id = None
+    item.recode_batch_id = None
+    item.total_volume = None
+    item.total_request_volume = None
+    item.weighed_at = None
+    item.recheck_status = 0
+    item.recheck_at = None
+    item.recheck_by = None
+    item.packing_status = 0
+    item.packed_at = None
+    item.packed_by = None
+    item.status = 1  # Back to in-progress
+
+    db.commit()
+    return {"status": "success", "message": "Item unpacked and inventory restored"}
+
+
+@router.patch("/prebatch-items/{item_id}/packing-status")
+def update_item_packing_status(item_id: int, data: PackingStatusUpdate, db: Session = Depends(get_db)):
+    """Update packing status of a prebatch item."""
+    item = db.query(models.PreBatchItem).filter(models.PreBatchItem.id == item_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Item not found")
+    item.packing_status = data.packing_status
+    if data.packing_status == 1:
+        item.packed_at = datetime.now()
+        item.packed_by = data.packed_by or "operator"
+    else:
+        item.packed_at = None
+        item.packed_by = None
+    db.commit()
+    return {"id": item.id, "packing_status": item.packing_status}
 
 # =============================================================================
 # PACKING & DELIVERY ENDPOINTS

@@ -81,13 +81,11 @@ export function usePreBatchLabels(deps: LabelDeps) {
         const totalBatches = opts.plan?.num_batches || (opts.plan?.batches?.length) || '-'
         const batchMatch = batchIdValue.match(/-(\d+)$/)
         const currentBatchNo = batchMatch ? parseInt(batchMatch[1]) : '-'
+        // Display package info: pkgNo / totalPkgs (e.g. "1/1" for 1 bag per batch)
+        const displayTotalPkgs = opts.totalPkgs || 1
+        const displayPkgFraction = `${opts.pkgNo}/${displayTotalPkgs}`
 
         const skuFullName = opts.batch.sku_id ? `${opts.batch.sku_id} / ${opts.plan?.sku_name || opts.plan?.name || '-'}` : (opts.plan?.sku_name || '-');
-
-        // Format PackageNo as "1/3" if totalPkgs is available
-        const displayPkgNo = (opts.totalPkgs && opts.totalPkgs !== '-' && opts.totalPkgs !== 1)
-            ? `${opts.pkgNo}/${opts.totalPkgs}`
-            : opts.pkgNo;
 
         return {
             SKU: opts.batch.sku_id || '-',
@@ -95,7 +93,7 @@ export function usePreBatchLabels(deps: LabelDeps) {
             "SKU / SKU_Name": skuFullName,
             PlanId: opts.planId || '-',
             BatchId: batchIdValue,
-            "Batch_Number/No of Batch": totalBatches !== '-' ? `${currentBatchNo}/${totalBatches}` : currentBatchNo,
+            "Batch_Number/No of Batch": displayPkgFraction,
             IngredientID: opts.ingName || '-',
             Ingredient_ReCode: opts.reCode || '-',
             ContainerType: opts.containerType || 'Bag',
@@ -108,7 +106,7 @@ export function usePreBatchLabels(deps: LabelDeps) {
             Timestamp: opts.timestamp,
             PackageSize: opts.netVol.toFixed(4),
             BatchRequireSize: opts.totalVol.toFixed(4),
-            PackageNo: displayPkgNo,
+            PackageNo: displayPkgFraction,
             QRCode: opts.qrCode,
             ...buildLotStrings(opts.origins, opts.fallbackLotId, opts.netVol),
         }
@@ -190,23 +188,19 @@ export function usePreBatchLabels(deps: LabelDeps) {
                 throw new Error('Invalid package numbers')
             }
             const ing = deps.ingredients.value.find((i: any) => i.re_code === deps.selectedReCode.value)
+            const itemId = deps.selectedRequirementId.value  // prebatch_items.id
             const recordData = {
-                req_id: deps.selectedRequirementId.value,
                 batch_record_id: `${deps.selectedBatch.value.batch_id}-${deps.selectedReCode.value}-${pkgNo}`,
-                plan_id: deps.selectedProductionPlan.value,
-                re_code: deps.selectedReCode.value,
+                net_volume: capturedScaleValue.value,
                 package_no: pkgNo,
                 total_packages: totalPkgs,
-                net_volume: capturedScaleValue.value,
-                total_volume: deps.requireVolume.value,
-                total_request_volume: deps.requireVolume.value,
                 intake_lot_id: deps.currentPackageOrigins.value[0]?.intake_lot_id || deps.selectedIntakeLotId.value,
                 mat_sap_code: ing?.mat_sap_code || null,
                 recode_batch_id: String(pkgNo).padStart(2, '0'),
                 origins: deps.currentPackageOrigins.value
             }
-            await $fetch(`${appConfig.apiBaseUrl}/prebatch-recs/`, {
-                method: 'POST',
+            await $fetch(`${appConfig.apiBaseUrl}/prebatch-items/${itemId}/pack`, {
+                method: 'PUT',
                 body: recordData,
                 headers: getAuthHeader() as Record<string, string>
             })

@@ -368,6 +368,73 @@ class PreBatchRec(PreBatchRecBase):
     class Config:
         from_attributes = True
 
+# ── PreBatchItem Schemas (NEW unified table) ──────────────────────────────────
+
+class PreBatchItemFromBase(BaseModel):
+    intake_lot_id: str = Field(..., max_length=50)
+    mat_sap_code: Optional[str] = Field(None, max_length=50)
+    take_volume: float
+
+class PreBatchItemFromCreate(PreBatchItemFromBase):
+    pass
+
+class PreBatchItemFrom(PreBatchItemFromBase):
+    id: int
+    prebatch_item_id: int
+    created_at: datetime
+    class Config:
+        from_attributes = True
+
+class PreBatchItemBase(BaseModel):
+    batch_db_id: int
+    plan_id: Optional[str] = None
+    batch_id: Optional[str] = None
+    re_code: Optional[str] = None
+    ingredient_name: Optional[str] = None
+    required_volume: Optional[float] = None
+    wh: Optional[str] = "Mix"
+    status: int = 0
+
+class PreBatchItemCreate(PreBatchItemBase):
+    pass
+
+class PreBatchItemPack(BaseModel):
+    """Fields sent when operator packs (weighs) an item."""
+    batch_record_id: str
+    net_volume: float
+    package_no: int = 1
+    total_packages: int = 1
+    intake_lot_id: Optional[str] = None
+    mat_sap_code: Optional[str] = None
+    recode_batch_id: Optional[str] = None
+    origins: Optional[List[PreBatchItemFromCreate]] = None
+
+class PreBatchItem(PreBatchItemBase):
+    id: int
+    batch_record_id: Optional[str] = None
+    net_volume: Optional[float] = None
+    package_no: Optional[int] = 1
+    total_packages: Optional[int] = 1
+    intake_lot_id: Optional[str] = None
+    mat_sap_code: Optional[str] = None
+    prebatch_id: Optional[str] = None
+    recode_batch_id: Optional[str] = None
+    total_volume: Optional[float] = None
+    total_request_volume: Optional[float] = None
+    recheck_status: Optional[int] = 0
+    recheck_at: Optional[datetime] = None
+    recheck_by: Optional[str] = None
+    packing_status: Optional[int] = 0
+    packed_at: Optional[datetime] = None
+    packed_by: Optional[str] = None
+    weighed_at: Optional[datetime] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    origins: List[PreBatchItemFrom] = []
+    
+    class Config:
+        from_attributes = True
+
 # Production Batch Schema
 class ProductionBatchBase(BaseModel):
     batch_id: str

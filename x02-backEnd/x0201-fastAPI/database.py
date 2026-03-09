@@ -54,16 +54,16 @@ DB_CONFIGS = {
 }
 
 # Active database state (default to remoteDB)
-_active_db_key = os.getenv("ACTIVE_DB", "remoteDB")
+_active_db_key = os.getenv("ACTIVE_DB", "cloudDB")
 
 
 def _build_url(host: str) -> str:
-    return f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{host}:{DB_PORT}/{DB_NAME}"
+    return f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{host}:{DB_PORT}/{DB_NAME}?connect_timeout=5"
 
 
 def _create_engine_for(host: str):
     url = _build_url(host)
-    return create_engine(url, pool_pre_ping=True, pool_recycle=3600)
+    return create_engine(url, pool_pre_ping=False, pool_recycle=3600)
 
 
 # Initial engine and session

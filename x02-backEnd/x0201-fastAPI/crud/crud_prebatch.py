@@ -209,7 +209,8 @@ def get_prebatch_req(db: Session, req_id: int) -> Optional[models.PreBatchReq]:
 
 
 def ensure_prebatch_reqs_for_batch(db: Session, batch_id: str) -> bool:
-    """Ensure PreBatch requirements exist for a batch; create from SKU recipe if missing."""
+    """Ensure PreBatch requirements exist for a batch; create from SKU recipe if missing.
+    Creates rows in BOTH prebatch_reqs (legacy) and prebatch_items (new unified table)."""
     if db.query(models.PreBatchReq).filter(models.PreBatchReq.batch_id == batch_id).count() > 0:
         return True
 
@@ -238,6 +239,7 @@ def ensure_prebatch_reqs_for_batch(db: Session, batch_id: str) -> bool:
             ingredient_info[step.re_code]['qty'] += (step.require or 0)
 
     try:
+        plan_id = batch.plan.plan_id if batch.plan else "-"
         for re_code, info in ingredient_info.items():
             req_vol = info['qty']
             if std_batch_size > 0:
@@ -251,13 +253,28 @@ def ensure_prebatch_reqs_for_batch(db: Session, batch_id: str) -> bool:
             if ing and ing[0]:
                 wh_loc = ing[0]
 
+            vol = round(req_vol, 4)
+
+            # Legacy table
             db.add(models.PreBatchReq(
                 batch_db_id=batch.id,
-                plan_id=batch.plan.plan_id if batch.plan else "-",
+                plan_id=plan_id,
                 batch_id=batch.batch_id,
                 re_code=re_code,
                 ingredient_name=info['name'],
-                required_volume=round(req_vol, 4),
+                required_volume=vol,
+                wh=wh_loc,
+                status=0,
+            ))
+
+            # New unified table
+            db.add(models.PreBatchItem(
+                batch_db_id=batch.id,
+                plan_id=plan_id,
+                batch_id=batch.batch_id,
+                re_code=re_code,
+                ingredient_name=info['name'],
+                required_volume=vol,
                 wh=wh_loc,
                 status=0,
             ))
@@ -268,3 +285,4 @@ def ensure_prebatch_reqs_for_batch(db: Session, batch_id: str) -> bool:
         db.rollback()
         logger.error("Error creating requirements for %s: %s", batch_id, e)
         return False
+
