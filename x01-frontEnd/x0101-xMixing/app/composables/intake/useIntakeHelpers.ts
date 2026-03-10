@@ -31,10 +31,12 @@ export const formatDateToApi = (val: string | null | undefined) => {
     if (!val) return null
     const cleaned = val.replace(/\//g, '')
     if (cleaned.length !== 8) return null
-    const day = cleaned.substring(0, 2)
-    const month = cleaned.substring(2, 4)
-    const year = cleaned.substring(4, 8)
-    const d = new Date(`${year}-${month}-${day}T00:00:00`)
+    const day = parseInt(cleaned.substring(0, 2))
+    const month = parseInt(cleaned.substring(2, 4))
+    const year = parseInt(cleaned.substring(4, 8))
+
+    // Use Date.UTC to ensure the ISO string doesn't get shifted by local timezone
+    const d = new Date(Date.UTC(year, month - 1, day, 0, 0, 0))
     if (isNaN(d.getTime())) return null
     return d.toISOString()
 }

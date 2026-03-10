@@ -193,7 +193,20 @@ def get_ingredient_intake_list(db: Session, list_id: str) -> Optional[models.Ing
 def create_ingredient_intake_list(db: Session, list_data: schemas.IngredientIntakeListCreate) -> models.IngredientIntakeList:
     """Create new ingredient intake list with error handling and individual package generation"""
     try:
-        db_list = models.IngredientIntakeList(**list_data.dict())
+        # Convert schema to dict
+        data = list_data.dict()
+        
+        # Look up ingredient master to fill in missing fields
+        ing_master = get_ingredient_by_mat_sap_code(db, mat_sap_code=data.get('mat_sap_code'))
+        if ing_master:
+            if not data.get('re_code'):
+                data['re_code'] = ing_master.re_code
+            if not data.get('material_description'):
+                data['material_description'] = ing_master.name
+            if not data.get('uom'):
+                data['uom'] = ing_master.unit
+
+        db_list = models.IngredientIntakeList(**data)
         db.add(db_list)
         db.commit()
         db.refresh(db_list)

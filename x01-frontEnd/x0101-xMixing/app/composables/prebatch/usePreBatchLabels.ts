@@ -315,7 +315,6 @@ export function usePreBatchLabels(deps: LabelDeps) {
             $q.notify({ type: 'warning', message: 'No records found to reprint' })
         }
     }
-
     const printAllPlanLabels = async (ing: any) => {
         if (!ing || !deps.selectedProductionPlan.value) return
 
@@ -353,6 +352,69 @@ export function usePreBatchLabels(deps: LabelDeps) {
                     plan: deps.selectedPlanDetails.value,
                     reCode: record.re_code,
                     ingName: record.ingredient_name || ing.ingredient_name || '-',
+                    matSapCode: record.mat_sap_code || '-',
+                    containerType: record.package_container_type || (deps.selectableIngredients.value.find((i: any) => i.re_code === record.re_code)?.package_container_type) || 'Bag',
+                    netVol: Number(record.net_volume),
+                    totalVol: Number(record.total_volume),
+                    pkgNo: record.package_no,
+                    totalPkgs: record.total_packages || 1,
+                    qrCode: `${deps.selectedProductionPlan.value},${record.batch_record_id},${record.prebatch_id || ''},${record.re_code},${record.net_volume}`,
+                    timestamp: new Date(record.created_at || Date.now()).toLocaleString('en-GB'),
+                    origins: record.origins?.length > 0 ? record.origins : undefined,
+                    fallbackLotId: record.intake_lot_id,
+                })
+                const svg = await generateLabelSvg('prebatch-label_4x3', data)
+                if (svg) allSvgs.push(svg)
+            } catch (err) {
+                console.error('Error generating label:', err)
+            }
+        }
+
+        if (allSvgs.length > 0) {
+            printLabel(allSvgs)
+            $q.notify({ type: 'positive', message: `Printing ${allSvgs.length} labels`, position: 'top' })
+        }
+    }
+
+    const printGlobalPlanLabels = async () => {
+        if (!deps.selectedProductionPlan.value) {
+            $q.notify({ type: 'warning', message: 'Please select a production plan first' })
+            return
+        }
+
+        const logs = deps.preBatchLogs.value
+        if (logs.length === 0) {
+            $q.notify({ type: 'warning', message: 'No records found for this plan' })
+            return
+        }
+
+        $q.notify({ type: 'info', message: `Generating labels for all ingredients (${logs.length} labels)...`, position: 'top', timeout: 2000 })
+
+        const allSvgs: string[] = []
+        // Sort logs by ingredient, then batch, then package number
+        const sortedLogs = [...logs].sort((a, b) => {
+            if (a.re_code < b.re_code) return -1
+            if (a.re_code > b.re_code) return 1
+            if (a.batch_record_id < b.batch_record_id) return -1
+            if (a.batch_record_id > b.batch_record_id) return 1
+            return a.package_no - b.package_no
+        })
+
+        for (const record of sortedLogs) {
+            try {
+                const parts = record.batch_record_id.split('-')
+                const batchId = parts.slice(0, 7).join('-')
+                const ing = deps.selectableIngredients.value.find((i: any) => i.re_code === record.re_code)
+
+                const data = buildLabelData({
+                    batch: {
+                        batch_id: batchId,
+                        sku_id: deps.selectedPlanDetails.value?.sku_id || '-'
+                    },
+                    planId: record.plan_id || deps.selectedProductionPlan.value,
+                    plan: deps.selectedPlanDetails.value,
+                    reCode: record.re_code,
+                    ingName: record.ingredient_name || ing?.ingredient_name || '-',
                     matSapCode: record.mat_sap_code || '-',
                     containerType: record.package_container_type || (deps.selectableIngredients.value.find((i: any) => i.re_code === record.re_code)?.package_container_type) || 'Bag',
                     netVol: Number(record.net_volume),
@@ -489,6 +551,7 @@ export function usePreBatchLabels(deps: LabelDeps) {
         quickReprint,
         printAllPlanLabels,
         printAllBatchLabels,
+        printGlobalPlanLabels,
         onPrintPackingBoxLabel,
         onDone,
     }

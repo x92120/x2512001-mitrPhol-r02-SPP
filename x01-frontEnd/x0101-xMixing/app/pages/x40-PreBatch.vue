@@ -199,7 +199,7 @@ const {
   buildLotStrings, buildLabelData,
   updateDialogPreview, updatePackingBoxPreview,
   openLabelDialog, onPrintLabel, onReprintLabel,
-  quickReprint, printAllPlanLabels, printAllBatchLabels, onPrintPackingBoxLabel, onDone,
+  quickReprint, printAllPlanLabels, printAllBatchLabels, printGlobalPlanLabels, onPrintPackingBoxLabel, onDone,
 } = usePreBatchLabels({
   $q, getAuthHeader: authHeader, t, user, formatDate,
   generateLabelSvg: (async (template: string, data: any) => (await generateLabelSvg(template, data)) ?? '') as (template: string, data: any) => Promise<string>,
@@ -1039,9 +1039,22 @@ const reopenScanDialogAfterPrint = () => {
                             </template>
                         </q-select>
                     </div>
-                    <q-badge color="blue-grey-6" text-color="white" class="text-weight-bold">
-                        {{ selectableIngredients.length }} {{ t('preBatch.items') }}
-                    </q-badge>
+                    <div class="row items-center no-wrap">
+                        <q-badge color="blue-grey-6" text-color="white" class="text-weight-bold">
+                            {{ selectableIngredients.length }} {{ t('preBatch.items') }}
+                        </q-badge>
+                        <q-btn 
+                            v-if="selectableIngredients.length > 0" 
+                            flat round dense 
+                            icon="print" 
+                            size="sm" 
+                            color="blue-grey-8" 
+                            class="q-ml-sm" 
+                            @click="printGlobalPlanLabels"
+                        >
+                            <q-tooltip>Print All Labels for this Plan</q-tooltip>
+                        </q-btn>
+                    </div>
                 </div>
             </q-card-section>
             <div class="col relative-position" style="overflow-y: auto;">
@@ -1088,8 +1101,8 @@ const reopenScanDialogAfterPrint = () => {
                                     <q-badge v-else color="grey-6" label="Created" size="sm" />
                                 </td>
                                 <td class="text-center">
-                                    <q-btn v-if="ing.status === 2" flat round dense icon="print" size="xs" color="blue-9" @click.stop="printAllPlanLabels(ing)">
-                                        <q-tooltip>Print All Labels for Plan</q-tooltip>
+                                    <q-btn v-if="ing.status >= 1" flat round dense icon="print" size="xs" color="blue-9" @click.stop="printAllPlanLabels(ing)">
+                                        <q-tooltip>Print All Labels for this Ingredient</q-tooltip>
                                     </q-btn>
                                 </td>
                             </tr>
@@ -1133,7 +1146,7 @@ const reopenScanDialogAfterPrint = () => {
                                                         <td class="text-center">
                                                             <div class="row no-wrap justify-center q-gutter-x-xs">
                                                                 <q-btn 
-                                                                    v-if="bd.status === 2" 
+                                                                    v-if="bd.status >= 1" 
                                                                     flat round dense 
                                                                     icon="print" 
                                                                     size="xs" 

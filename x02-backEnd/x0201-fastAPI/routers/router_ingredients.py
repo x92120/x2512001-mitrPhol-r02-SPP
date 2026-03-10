@@ -307,13 +307,19 @@ async def bulk_import_ingredient_intake(file: UploadFile = File(...), db: Sessio
                     errors.append(f"Row {i+1}: Invalid volume numbers")
                     continue
 
+                # Look up ingredient master to fill in missing re_code or description
+                ing_master = crud.get_ingredient_by_mat_sap_code(db, mat_sap_code=mat_code)
+                re_code_val = row_clean.get('Re-Code') or (ing_master.re_code if ing_master else None)
+                mat_desc_val = row_clean.get('Material Description') or (ing_master.name if ing_master else None)
+                mat_uom_val = row_clean.get('Base Unit of Measure') or row_clean.get('UoM') or (ing_master.unit if ing_master else None)
+
                 item = schemas.IngredientIntakeListCreate(
                     intake_lot_id=crud.get_next_intake_id(db),
                     intake_from=row_clean.get('Storage Location') or row_clean.get('Storage Loca'),
                     mat_sap_code=mat_code,
-                    re_code=row_clean.get('Re-Code'),
-                    material_description=row_clean.get('Material Description'),
-                    uom=row_clean.get('Base Unit of Measure') or row_clean.get('UoM'),
+                    re_code=re_code_val,
+                    material_description=mat_desc_val,
+                    uom=mat_uom_val,
                     intake_vol=intake_vol,
                     remain_vol=remain_vol,
                     intake_package_vol=pkg_vol,
