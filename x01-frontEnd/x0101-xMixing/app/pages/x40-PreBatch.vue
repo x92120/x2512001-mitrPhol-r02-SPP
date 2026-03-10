@@ -62,7 +62,7 @@ const scalesComposable = usePreBatchScales({
 })
 const {
   selectedScale, scales, connectedScales, batchedVolume, currentPackageOrigins,
-  activeScale, actualScaleValue, remainVolume, remainToBatch,
+  activeScale, actualScaleValue, remainVolume, lastCapturedWeight,
   targetWeight, requestBatch, isToleranceExceeded, isPackagedVolumeInTol,
   packagedVolumeBgColor,
   onScaleInput, isScaleConnected, toggleScaleConnection,
@@ -79,47 +79,8 @@ let _updateRequireVolume: () => void = () => {}
 let _finalizeBatchPreparation: (batchId: number) => Promise<void> = async () => {}
 let _onBatchIngredientClick: (batch: any, req: any, plan: any) => Promise<void> = async () => {}
 
-// ─── shared refs that depend on composables ───
-const baseContainerSizeOptions = [0.1, 0.2, 0.3, 0.5, 1, 2, 5, 10, 20, 25]
-const containerSizeOptions = computed(() => {
-  const options = [...baseContainerSizeOptions]
-  const config = selectableIngredients.value.find(i => i.re_code === selectedReCode.value)
-  if (config && config.std_package_size > 0 && !options.includes(config.std_package_size)) {
-    options.push(config.std_package_size)
-  }
-  return options.sort((a, b) => a - b)
-})
-const containerSize = ref(25)
 
-// Watch containerSize to update packageSize
-watch(containerSize, (val) => {
-  if (val !== packageSize.value) {
-    packageSize.value = val
-  }
-})
-
-watch(packageSize, (val) => {
-  if (containerSizeOptions.value.includes(val)) {
-    containerSize.value = val
-  }
-})
-
-// Watch selectedReCode to initialize containerSize from config
-watch(selectedReCode, (newReCode) => {
-  if (newReCode) {
-    const config = selectableIngredients.value.find(i => i.re_code === newReCode)
-    if (config && config.std_package_size > 0) {
-      containerSize.value = config.std_package_size
-    }
-  }
-})
-
-const currentPackageId = computed(() => {
-  if (selectedBatch.value && selectedReCode.value) {
-    return `${selectedBatch.value.batch_id}-${selectedReCode.value}-${nextPackageNo.value}`
-  }
-  return '-'
-})
+// (Moved logic below destructuring to fix ID 599 lint errors)
 
 // ─── 3. Ingredients ───
 // selectedProductionPlan and selectedBatch are owned by production composable
@@ -127,6 +88,8 @@ const currentPackageId = computed(() => {
 const _selectedProductionPlan = ref('')
 const _selectedBatch = ref<any>(null)
 const _preBatchLogs = ref<any[]>([])
+const autoPrint = ref(true)
+
 
 const ingredientsComposable = usePreBatchIngredients({
   $q, getAuthHeader: authHeader, t,
@@ -210,6 +173,7 @@ const production = usePreBatchProduction({
   updatePrebatchItemStatus,
   updateRequireVolume,
   ingredientBatchDetail,
+  selectedIntakeLotId,
 })
 const {
   selectedBatchIndex, isLoading, productionPlans, planFilter, productionPlanOptions,
@@ -267,14 +231,255 @@ const {
   selectedIntakeLotId,
   selectedInventoryItem,
   productionPlans,
+  prebatchItems,
+  ingredientBatchDetail,
 })
 
 // Step 7: After label print (dialog closes) → reopen scan dialog for next batch
-watch(showLabelDialog, (newVal, oldVal) => {
+watch(showLabelDialog, async (newVal, oldVal) => {
   if (oldVal === true && newVal === false && selectedReCode.value) {
-    // Label dialog just closed → reopen scan dialog for next item
+    // If a lot is already checked in, skip the scan dialog and go to next item
+    if (selectedIntakeLotId.value) {
+      console.log('🔄 Auto-continuing to next batch (Lot already checked in)')
+      await fetchScanDialogItems()
+      const next = nextPendingItem.value
+      if (next) {
+        onScanItemSelect(next)
+        return
+      }
+    }
+    // Else (no lot or no more items) -> reopen scan dialog for next item
     setTimeout(() => openScanDialog(), 500)
   }
+})
+
+// ─── Post-Destructuring Logic & Reactive Logic ───
+const baseContainerSizeOptions = [0.1, 0.2, 0.3, 0.5, 1, 2, 5, 10, 20, 25]
+const containerSizeOptions = computed(() => {
+  const options = [...baseContainerSizeOptions]
+  // selectableIngredients is now defined
+  const config = selectableIngredients.value.find((i: any) => i.re_code === selectedReCode.value)
+  if (config && config.std_package_size > 0 && !options.includes(config.std_package_size)) {
+    options.push(config.std_package_size)
+  }
+  return options.sort((a, b) => a - b)
+})
+const containerSize = ref(25)
+
+// Watch containerSize to update packageSize
+watch(containerSize, (val) => {
+  if (val !== packageSize.value) {
+    packageSize.value = val
+  }
+})
+
+watch(packageSize, (val) => {
+  if (containerSizeOptions.value.includes(val)) {
+    containerSize.value = val
+  }
+})
+
+// Watch selectedReCode to initialize containerSize from config AND clear lot on change
+watch(selectedReCode, (newReCode) => {
+  // Clear the intake lot when the ingredient changes
+  selectedIntakeLotId.value = ''
+  
+  if (newReCode) {
+    const config = selectableIngredients.value.find((i: any) => i.re_code === newReCode)
+    if (config && config.std_package_size > 0) {
+      containerSize.value = config.std_package_size
+    }
+  }
+})
+
+const currentPackageId = computed(() => {
+  if (selectedBatch.value && selectedReCode.value) {
+    return `${selectedBatch.value.batch_id}-${selectedReCode.value}-${nextPackageNo.value}`
+  }
+  return '-'
+})
+
+
+// --- 7-Step Guided Workflow Logic ---
+const workflowStep = ref(1)
+const pendingAdvance = ref<{ batchId: string, reCode: string } | null>(null)
+
+const workflowStatus = computed(() => {
+    if (!selectedReCode.value) return { id: 1, msg: 'Select Ingredient', color: 'primary' }
+    if (!selectedIntakeLotId.value) return { id: 2, msg: 'Scan Intake Lot', color: 'orange-10' }
+    if (workflowStep.value === 3) return { id: 3, msg: 'Ready to Start Pre-Batch', color: 'blue-8' }
+    if (workflowStep.value === 4) return { id: 4, msg: 'Manual Weighing in Progress', color: 'green-8' }
+    if (workflowStep.value === 7) return { id: 7, msg: 'Package Complete - Clear Scale', color: 'red-9' }
+    return { id: 0, msg: 'Idle', color: 'grey' }
+})
+
+const handleDoneClick = async () => {
+    const currentBatchId = selectedBatch.value?.batch_id
+    const currentReCode = selectedReCode.value
+    
+    // Capture weight
+    lastCapturedWeight.value = actualScaleValue.value
+    
+    // Save and Print (Step 6)
+    await onDone(true)
+    
+    // Move to Take Out state (Step 7)
+    workflowStep.value = 7
+    pendingAdvance.value = { batchId: currentBatchId, reCode: currentReCode }
+}
+
+const handleStartWeighting = () => {
+    workflowStep.value = 4 // Manual Batching (Weighing)
+}
+
+const handleStep7Confirm = (manual = false) => {
+    // Determine the logical next step based on remaining items (Step 7 Loop)
+    const packages = getPackagePlan(selectedBatch.value?.batch_id, selectedReCode.value, requireVolume.value)
+    
+    // CRITICAL: If remainVolume is 0, we MUST advance to the next batch, regardless of package count.
+    const isBatchFinished = remainVolume.value <= 0.0001
+    const hasMorePkgsInCurrentBatch = packages.some(p => p.status === 'pending')
+    
+    if (!isBatchFinished && hasMorePkgsInCurrentBatch) {
+        // Popup for next package (bag/box) in the SAME batch
+        $q.dialog({
+            title: 'NEXT PREPARATION',
+            message: `Batch ${selectedBatch.value?.batch_id} still requires more packages. <br/>Proceed to prepare <b>next bag/box</b> for ${selectedReCode.value}? <br/>(Lot: ${selectedIntakeLotId.value})`,
+            ok: { label: 'Confirm & Next', color: 'blue-10', unelevated: true },
+            cancel: { label: 'Stop/Exit', flat: true, color: 'grey-7' },
+            html: true,
+            persistent: true
+        }).onOk(() => {
+            currentPackageOrigins.value = [] // Fresh container
+            workflowStep.value = 3
+            $q.notify({ type: 'info', message: 'Ready for next bag/box', position: 'top' })
+        })
+    } else {
+        // Current batch is done for this ingredient, advance to the NEXT batch
+        handleAdvanceInternal()
+    }
+}
+
+const handleStopPreBatch = () => {
+    $q.dialog({
+        title: 'STOP PRE-BATCH',
+        message: 'Are you sure you want to <b class="text-red-9">STOP</b> and reset the current workflow? <br/>Any unprinted weights will be lost.',
+        ok: { label: 'Yes, Stop & Reset', color: 'red-9', unelevated: true },
+        cancel: { flat: true, color: 'grey-7' },
+        html: true,
+        persistent: true
+    }).onOk(() => {
+        workflowStep.value = 1
+        selectedReCode.value = ''
+        selectedIntakeLotId.value = ''
+        currentPackageOrigins.value = []
+        $q.notify({ type: 'info', message: 'Workflow reset to Step 1', position: 'top' })
+    })
+}
+
+const handleAdvanceInternal = async () => {
+    if (pendingAdvance.value) {
+        const nextBatchPromise = advanceToNextBatch(pendingAdvance.value.batchId, pendingAdvance.value.reCode)
+        
+        // Popup for next Batch in the queue
+        $q.dialog({
+            title: 'NEXT PRE-BATCH',
+            message: `Batch ${pendingAdvance.value.batchId} completed. <br/>Ready to start <b>NEXT BATCH</b> for ${pendingAdvance.value.reCode}? <br/>(Lot: ${selectedIntakeLotId.value})`,
+            ok: { label: 'Start Next Batch', color: 'blue-10', unelevated: true },
+            cancel: { label: 'Stop/Exit', flat: true, color: 'grey-7' },
+            html: true,
+            persistent: true
+        }).onOk(async () => {
+            await nextBatchPromise
+            currentPackageOrigins.value = [] // Reset weighing data
+            // If still same ingredient after advance, loop to Step 3
+            if (selectedReCode.value === pendingAdvance.value?.reCode) {
+                workflowStep.value = 3
+                $q.notify({ type: 'info', message: `Advanced to: ${selectedBatch.value?.batch_id}`, position: 'top' })
+            } else {
+                workflowStep.value = selectedReCode.value ? 3 : 1
+            }
+            pendingAdvance.value = null
+        })
+    }
+}
+
+// --- Workflow Confirmation Helper ---
+const confirmTransition = (nextStep: number, message: string, onOk?: () => void) => {
+    // If already in the target step, don't re-trigger logic
+    if (workflowStep.value === nextStep) return
+    
+    console.log(`[Workflow] Silent transition to Step ${nextStep}: ${message.replace(/<[^>]+>/g, '')}`)
+    
+    // Jump to next step immediately
+    workflowStep.value = nextStep
+    
+    // Execute callback if any
+    if (onOk) onOk()
+    
+    // Show a transient notification instead of a blocking popup
+    $q.notify({
+        message: message,
+        html: true,
+        icon: 'info',
+        color: 'blue-10',
+        position: 'top',
+        timeout: 1500
+    })
+}
+
+// Global workflow watcher for transitions
+watch([workflowStep, actualScaleValue, () => activeScale.value?.isStable, selectedReCode, selectedIntakeLotId], 
+([step, val, stable, re, lot]) => {
+    
+    // 1. If ingredient selected but no lot -> Scan (Step 2)
+    if (re && !lot && step === 1) {
+        workflowStep.value = 2
+        openScanDialog() // Open the popup as requested
+    }
+
+    // 2. If lot is matched -> Ready (Step 3)
+    if (re && lot && step === 2) {
+        workflowStep.value = 3
+    }
+    
+    // 3. Auto-Tare: If at Step 3 and stable zero, enabled START (No auto-advance here, wait for click)
+
+    // 4. If at Step 7 and scale cleared -> confirm takeout
+    if (step === 7) {
+        const zeroThreshold = (activeScale.value?.tolerance || 0.01) * 2
+        if (Math.abs(val) <= zeroThreshold) {
+            handleStep7Confirm()
+        }
+    }
+
+    // Protection: Keep state if re-code temporarily vanishes
+    if (!re && step > 2 && step <= 7) return 
+    
+    if (!re && step !== 1) {
+        workflowStep.value = 1
+    }
+})
+
+watch(() => workflowStep.value, (step) => {
+    if (step === 2 && !showScanDialog.value && !selectedIntakeLotId.value) {
+        openScanDialog()
+    }
+})
+
+// Sync workflow when selecting ingredient manually
+watch([selectedReCode, selectedIntakeLotId], ([re, lot]) => {
+    // If we are already in the middle of a procedure (Steps 3-7), 
+    // do NOT let this sync-watcher push us back to 1/2 unless re is cleared.
+    if (workflowStep.value >= 3 && re) return
+
+    if (re && !lot) {
+        workflowStep.value = 2
+    } else if (re && lot && workflowStep.value < 3) {
+        workflowStep.value = 3
+    } else if (!re) {
+        workflowStep.value = 1
+    }
 })
 
 // ── Pre-Batch Summary Report ──────────────
@@ -404,12 +609,52 @@ const confirmRebatch = async () => {
 }
 
 // ── Scan Prebatch Dialog (Workflow Controller) ──
+const playSound = async (type: 'correct' | 'wrong') => {
+  try {
+    const ctx = new (window.AudioContext || (window as any).webkitAudioContext)()
+    await ctx.resume()
+    const osc = ctx.createOscillator()
+    const gain = ctx.createGain()
+    osc.connect(gain)
+    gain.connect(ctx.destination)
+    if (type === 'correct') {
+      osc.frequency.value = 880
+      osc.type = 'sine'
+      gain.gain.value = 0.1
+      osc.start()
+      setTimeout(() => { osc.frequency.value = 1320 }, 100)
+      setTimeout(() => { osc.stop(); ctx.close() }, 280)
+    } else {
+      osc.frequency.value = 200
+      osc.type = 'square'
+      gain.gain.value = 0.1
+      osc.start()
+      setTimeout(() => { osc.frequency.value = 150 }, 150)
+      setTimeout(() => { osc.stop(); ctx.close() }, 400)
+    }
+  } catch (e) {
+    console.warn('Sound playback failed:', e)
+  }
+}
+
 const showScanDialog = ref(false)
+const mainLotInputRef = ref<any>(null)
 const scanDialogItems = ref<any[]>([])
 const scanDialogLoading = ref(false)
 const scanLotInput = ref('')
 const scanLotValidated = ref(false)
 const scanLotError = ref('')
+
+const handleScanError = (msg: string) => {
+  scanLotError.value = msg
+  scanLotValidated.value = false
+  playSound('wrong')
+  // Wait 2 sec then clear
+  setTimeout(() => {
+    scanLotInput.value = ''
+    scanLotError.value = ''
+  }, 2000)
+}
 
 // Current ingredient info for the dialog header
 const scanDialogIngInfo = computed(() => {
@@ -454,21 +699,9 @@ const fifoRecommendedLot = computed(() => {
 })
 
 /**
- * Step 1: Click ingredient → open scan dialog
+ * Fetch all batches for the current ingredient to show in scan/progress dialog
  */
-const openScanDialog = async (ing?: any) => {
-  // If an ingredient is passed, select it first
-  if (ing) {
-    selectedReCode.value = ing.re_code
-    ingredientsComposable.onSelectIngredient(ing)
-  }
-
-  // Reset scan state
-  scanLotInput.value = ''
-  scanLotValidated.value = false
-  scanLotError.value = ''
-  showScanDialog.value = true
-
+const fetchScanDialogItems = async () => {
   if (!selectedReCode.value || !selectedProductionPlan.value) return
   scanDialogLoading.value = true
   try {
@@ -486,53 +719,141 @@ const openScanDialog = async (ing?: any) => {
 }
 
 /**
+ * Step 1: Click ingredient → open scan dialog
+ */
+const openScanDialog = async (ing?: any) => {
+  // 1. If an ingredient is passed, select it first
+  if (ing) {
+    // Manual click on ingredient row -> Reset Lot ID for new scan as per "until next Click" requirement
+    if (selectedIntakeLotId.value) {
+      console.log('🔄 Manual ingredient selection. Clearing lot for fresh scan.')
+      selectedIntakeLotId.value = ''
+    }
+    
+    selectedReCode.value = ing.re_code
+    ingredientsComposable.onSelectIngredient(ing)
+  }
+
+  // 2. Pre-fetch items to know what's next
+  await fetchScanDialogItems()
+
+  // 3. SHOW DIALOG: Always show popup as requested in Step 2
+  scanLotInput.value = ''
+  scanLotValidated.value = false
+  scanLotError.value = ''
+  showScanDialog.value = true
+}
+
+/**
  * Step 3: Scan intake lot label → validate
  * Accepts only intake labels like "LB-26-004205"
  * Checks FIFO (first expiry, active lot)
  */
+// Auto-process scanner input aggressively
+watch(scanLotInput, (newVal) => {
+  if (!newVal || scanLotValidated.value) return
+  
+  // Trigger if we see at least 2 pipes, or if the string is long enough to be a barcode
+  if (newVal.includes('|') && newVal.split('|').length >= 3) {
+    onScanLotEnter()
+  }
+})
+
 const onScanLotEnter = async () => {
-  const lotId = scanLotInput.value.trim()
-  if (!lotId) return
+  const scannedValue = scanLotInput.value.trim()
+  if (!scannedValue || scanLotValidated.value) return
 
-  // Find in inventory — check it matches the current ingredient, is active, FIFO
-  const invItem = inventoryRows.value.find((inv: any) =>
-    inv.intake_lot_id === lotId &&
-    inv.re_code === selectedReCode.value
+  console.log('--- SCANNER DIAGNOSIS START ---')
+  console.log('1. Raw Input:', scannedValue)
+  
+  const rawParts = scannedValue.split('|').map(p => p.trim())
+  const parts = rawParts.filter(p => p.length > 0)
+  console.log('2. Parsed Parts:', parts)
+
+  // Basic format check
+  if (rawParts.length < 2) return
+
+  const expectedReCode = (selectedReCode.value || '').trim().toUpperCase()
+  const expectedSapCode = (scanDialogIngInfo.value?.mat_sap_code || '').trim().toUpperCase()
+  console.log('3. Requirement:', { expectedReCode, expectedSapCode })
+
+  // Debug: Show what we have in inventory for this ingredient
+  const possibleLots = inventoryRows.value.filter(inv => 
+    (inv.re_code || '').trim().toUpperCase() === expectedReCode || 
+    (inv.mat_sap_code || '').trim().toUpperCase() === expectedSapCode
   )
+  console.log('4. Available Lots in System for this Ingredient:')
+  console.table(possibleLots.map(l => ({ 
+    LotID: l.intake_lot_id, 
+    SupLot: l.lot_id, 
+    Exp: formatDate(l.expire_date),
+    Status: l.status 
+  })))
 
-  if (!invItem) {
-    scanLotError.value = `Lot ${lotId} not found for ingredient "${selectedReCode.value}"`
-    scanLotValidated.value = false
+  // Identify dates in scan (DD/MM/YYYY)
+  const scanDates = parts.filter(p => /^\d{1,2}\/\d{1,2}\/\d{4}$/.test(p))
+
+  // --- MATCHING LOGIC ---
+  let matchedLot: any = null
+
+  // Priority 1: Match any part of scan to Lot ID or Supplier Lot ID
+  for (const part of parts) {
+    const pUpper = part.toUpperCase()
+    matchedLot = possibleLots.find(inv => 
+      (inv.intake_lot_id?.trim().toUpperCase() === pUpper) || 
+      (inv.lot_id?.trim().toUpperCase() === pUpper)
+    )
+    if (matchedLot) {
+      console.log('✅ Found match by Lot ID:', part)
+      break
+    }
+  }
+
+  // Priority 2: Fallback - Match by Expiry Date + SAP Code (if Lot ID is missing/corrupted in scan)
+  if (!matchedLot && scanDates.length > 0) {
+    matchedLot = possibleLots.find(inv => scanDates.includes(formatDate(inv.expire_date)))
+    if (matchedLot) console.log('✅ Found match by Expiry Date Fallback:', formatDate(matchedLot.expire_date))
+  }
+
+  if (!matchedLot) {
+    console.error('❌ NO MATCH FOUND')
+    // If it looks like a real scan but nothing matches, show error
+    if (parts.length > 2) {
+      handleScanError(`Lot not found. System expected a lot for ${expectedReCode} (SAP: ${expectedSapCode})`)
+    }
     return
   }
 
-  if (invItem.status === 'Inactive' || invItem.status === 'Expired') {
-    scanLotError.value = `Lot ${lotId} is ${invItem.status}. Use an active lot.`
-    scanLotValidated.value = false
+  // Verification
+  const lotId = matchedLot.intake_lot_id
+  if (matchedLot.status === 'Inactive' || matchedLot.status === 'Hold') {
+    handleScanError(`Lot ${lotId} is ${matchedLot.status}.`)
     return
   }
 
   // FIFO check
-  if (!isFIFOCompliant(invItem as any)) {
-    scanLotError.value = `Lot ${lotId} is not FIFO compliant. Use the earliest expiry lot first.`
-    scanLotValidated.value = false
+  const recommended = fifoRecommendedLot.value
+  if (recommended && lotId.trim().toUpperCase() !== recommended.intake_lot_id.trim().toUpperCase()) {
+    handleScanError(`FIFO Violation! Use: ${recommended.intake_lot_id}`)
     return
   }
 
-  // Valid!
+  // SUCCESS
+  console.log('--- SCANNER VERIFIED ---')
   scanLotError.value = ''
   scanLotValidated.value = true
   selectedIntakeLotId.value = lotId
-  selectedInventoryItem.value = invItem as any
+  selectedInventoryItem.value = [matchedLot] as any
 
-  $q.notify({ type: 'positive', message: `✅ Lot ${lotId} verified`, position: 'top', timeout: 1500 })
+  playSound('correct')
+  $q.notify({ type: 'positive', message: `✅ Verified: ${lotId}`, position: 'top', timeout: 1500 })
 
-  // Step 4: Auto-select next pending prebatch item
+  // Auto-advance to weighing — SILENTLY
   const pending = nextPendingItem.value
   if (pending) {
-    onScanItemSelect(pending)
-  } else {
-    $q.notify({ type: 'positive', message: 'All batches completed for this ingredient!', position: 'top' })
+    setTimeout(() => {
+      onScanItemSelect(pending)
+    }, 400)
   }
 }
 
@@ -550,20 +871,6 @@ const onScanItemSelect = (item: any) => {
   $q.notify({ type: 'info', message: `Weighing: ${item.batch_id}`, position: 'top', timeout: 2000 })
 }
 
-/**
- * Mid-weighing: Add current lot's partial weight, then reopen scan dialog for next lot
- */
-const onAddLotAndScanNext = () => {
-  onAddLot(selectedIntakeLotId, selectableIngredients, selectedInventoryItem)
-  // Reset lot validation state
-  scanLotInput.value = ''
-  scanLotError.value = ''
-  scanLotValidated.value = false
-  // Reopen scan dialog for next lot
-  setTimeout(() => {
-    showScanDialog.value = true
-  }, 300)
-}
 
 /**
  * Step 7: After label print → reopen scan dialog for next batch
@@ -824,9 +1131,28 @@ const reopenScanDialogAfterPrint = () => {
                                                             <q-badge v-else color="grey-5" label="Wait" size="sm" />
                                                         </td>
                                                         <td class="text-center">
-                                                            <q-btn v-if="bd.status === 2" flat round dense icon="edit" size="xs" color="orange-9" @click.stop="onRebatchClick(bd, ing)">
-                                                                <q-tooltip>Rebatch — cancel and re-weigh</q-tooltip>
-                                                            </q-btn>
+                                                            <div class="row no-wrap justify-center q-gutter-x-xs">
+                                                                <q-btn 
+                                                                    v-if="bd.status === 2" 
+                                                                    flat round dense 
+                                                                    icon="print" 
+                                                                    size="xs" 
+                                                                    color="blue-9" 
+                                                                    @click.stop="printAllBatchLabels(bd.batch_id, ing.re_code, bd.required_volume)"
+                                                                >
+                                                                    <q-tooltip>Reprint Batch Labels</q-tooltip>
+                                                                </q-btn>
+                                                                <q-btn 
+                                                                    v-if="bd.status === 2" 
+                                                                    flat round dense 
+                                                                    icon="edit" 
+                                                                    size="xs" 
+                                                                    color="orange-9" 
+                                                                    @click.stop="onRebatchClick(bd, ing)"
+                                                                >
+                                                                    <q-tooltip>Rebatch — cancel and re-weigh</q-tooltip>
+                                                                </q-btn>
+                                                            </div>
                                                         </td>
                                                     </tr>
                                                     <!-- Expanded package plan -->
@@ -897,9 +1223,17 @@ const reopenScanDialogAfterPrint = () => {
 
         <!-- SCALES SECTION -->
         <q-card bordered flat class="q-mb-md">
-          <q-card-section class="q-py-xs row items-center">
+          <q-card-section class="q-py-xs row items-center bg-blue-grey-1">
             <div class="text-subtitle1 text-weight-bold">{{ t('preBatch.weightingScale') }}</div>
             <q-space />
+            <div class="row items-center q-gutter-x-sm">
+                <q-chip :color="workflowStatus.color" text-color="white" square size="md" class="text-weight-bold shadow-1">
+                    STEP {{ workflowStatus.id }}
+                </q-chip>
+                <div class="text-h6 text-weight-bolder" :class="`text-${workflowStatus.color}`">
+                    {{ workflowStatus.msg.toUpperCase() }}
+                </div>
+            </div>
           </q-card-section>
 
           <q-card-section class="q-py-sm">
@@ -941,28 +1275,73 @@ const reopenScanDialogAfterPrint = () => {
 
         <!-- Package Batching Prepare Section -->
         <q-card bordered flat class="q-mb-md">
-            <q-card-section class="q-py-xs row items-center">
-                <div class="text-subtitle1 text-weight-bold">{{ t('preBatch.packagePrepareFor') }}</div>
-                <div class="col-4 q-ml-sm">
+            <q-card-section class="q-py-xs row items-center no-wrap q-gutter-x-md">
+                <!-- Part 1: Batch ID -->
+                <div class="row items-center no-wrap col-auto">
+                    <div class="text-subtitle1 text-weight-bold q-mr-sm text-no-wrap">{{ t('preBatch.packagePrepareFor') }}</div>
                     <q-input
                         outlined
                         :model-value="selectedBatch ? selectedBatch.batch_id : ''"
                         dense
                         bg-color="grey-2"
                         readonly
-                        :placeholder="t('preBatch.batchPlanningId')"
+                        style="width: 250px"
                     />
                 </div>
+
                 <q-space />
-                <div class="text-subtitle1 text-weight-bold q-mr-sm">{{ t('preBatch.fromIntakeLotId') }}</div>
-                <div class="col-4">
-                    <q-input
-                        outlined
-                        :model-value="currentPackageOrigins.length > 0 ? currentPackageOrigins.map((o: any) => o.intake_lot_id).join(' + ') : (selectedIntakeLotId || '—')"
-                        dense
-                        bg-color="grey-2"
-                        readonly
-                    />
+
+                <!-- Part 2: Auto Print -->
+                <q-toggle 
+                    v-model="autoPrint" 
+                    :label="t('common.autoPrint') || 'Auto Print'" 
+                    color="green" 
+                    dense 
+                    class="text-weight-bold text-no-wrap"
+                />
+
+                <q-separator vertical inset class="q-mx-sm" />
+
+                <!-- Part 3: Intake Lot ID & Silent Scan -->
+                <div class="row items-center no-wrap col-auto q-gutter-x-sm">
+                    <div class="text-subtitle1 text-weight-bold text-no-wrap">{{ t('preBatch.fromIntakeLotId') }}</div>
+                    <div style="width: 280px; position: relative;">
+                        <!-- FIFO Recommendation Hint -->
+                        <div v-if="workflowStep === 2 && fifoRecommendedLot" class="absolute-top-right text-caption text-green-9 text-weight-bold" style="top: -18px; right: 4px;">
+                            <q-icon name="info" size="xs" color="green" /> Use: {{ fifoRecommendedLot.intake_lot_id }}
+                        </div>
+                        <q-input
+                            v-if="workflowStep === 2"
+                            ref="mainLotInputRef"
+                            v-model="scanLotInput"
+                            outlined
+                            dense
+                            autofocus
+                            bg-color="orange-1"
+                            placeholder="ZAP BARCODE HERE"
+                            @keyup.enter="onScanLotEnter"
+                            :error="!!scanLotError"
+                            :error-message="scanLotError"
+                            input-class="text-weight-bold text-center"
+                        >
+                             <template v-slot:prepend>
+                                 <q-icon name="qr_code_scanner" color="orange-9" size="xs" />
+                             </template>
+                        </q-input>
+                        <q-input
+                            v-else
+                            outlined
+                            :model-value="currentPackageOrigins.length > 0 ? currentPackageOrigins.map((o: any) => o.intake_lot_id).join(' + ') : (selectedIntakeLotId || '—')"
+                            dense
+                            :bg-color="selectedIntakeLotId ? 'green-1' : 'grey-2'"
+                            readonly
+                            input-class="text-weight-bold text-center"
+                        >
+                            <template v-slot:append>
+                                <q-btn icon="qr_code_scanner" flat round dense size="sm" @click="showScanDialog = true" color="grey-6" />
+                            </template>
+                        </q-input>
+                    </div>
                 </div>
             </q-card-section>
 
@@ -1010,7 +1389,7 @@ const reopenScanDialogAfterPrint = () => {
                         <div class="text-subtitle2 q-mb-xs text-no-wrap">{{ t('preBatch.packagedVolume') }}</div>
                         <q-input
                             outlined
-                            :model-value="batchedVolume.toFixed(5)"
+                            :model-value="(workflowStep === 7 ? lastCapturedWeight : batchedVolume).toFixed(5)"
                             dense
                             :bg-color="packagedVolumeBgColor"
                             readonly
@@ -1023,7 +1402,7 @@ const reopenScanDialogAfterPrint = () => {
                         <div class="text-subtitle2 q-mb-xs text-no-wrap">{{ t('preBatch.remainVolume') }}</div>
                         <q-input
                             outlined
-                            :model-value="remainToBatch.toFixed(5)"
+                            :model-value="remainVolume.toFixed(5)"
                             dense
                             bg-color="grey-2"
                             readonly
@@ -1118,35 +1497,56 @@ const reopenScanDialogAfterPrint = () => {
                     </div>
                 </div>
 
-                <!-- Controls Row: Add Lot & Done -->
-                <div class="row q-col-gutter-md items-end justify-end">
-                <!-- Add Lot Button (mid-weighing: lot empty, need next lot) -->
-                <div class="col-12 col-md-2" v-if="actualScaleValue > 0 && !isPackagedVolumeInTol && selectedIntakeLotId">
-                    <q-btn
-                    label="Add Lot & Scan Next"
-                    color="orange-9"
-                    text-color="white"
-                    icon="add_circle"
-                    class="full-width q-py-xs"
-                    size="md"
-                    unelevated
-                    @click="onAddLotAndScanNext"
-                    />
-                </div>
+                <!-- Static Control Row: ALWAYS SHOW ACTIVE OR INACTIVE -->
+                <div class="row q-col-gutter-md items-center justify-end q-pt-md">
+                    
+                    <!-- Stop Button -->
+                    <div class="col-12 col-md-4">
+                        <q-btn
+                            label="STOP"
+                            color="red-10"
+                            icon="stop"
+                            class="full-width"
+                            style="height: 44px"
+                            unelevated
+                            @click="handleStopPreBatch"
+                            :disable="workflowStep === 1 && !selectedReCode"
+                            flat
+                            outline
+                        />
+                    </div>
 
-                <!-- Done Button -->
-                <div class="col-12 col-md-2">
-                    <q-btn
-                    :label="t('prodPlan.done')"
-                    :color="isPackagedVolumeInTol ? 'green' : 'grey-6'"
-                    :text-color="isPackagedVolumeInTol ? 'white' : 'black'"
-                    class="full-width q-py-xs"
-                    size="md"
-                    unelevated
-                    @click="onDone"
-                    :disable="!isPackagedVolumeInTol"
-                    />
-                </div>
+                    <!-- Step 3: Start PreBatch -->
+                    <div class="col-12 col-md-4">
+                        <q-btn
+                            label="START"
+                            :color="workflowStep === 3 ? 'blue-10' : 'grey-4'"
+                            :text-color="workflowStep === 3 ? 'white' : 'grey-7'"
+                            icon="play_arrow"
+                            class="full-width"
+                            style="height: 44px"
+                            unelevated
+                            @click="handleStartWeighting"
+                            :disable="workflowStep !== 3"
+                            :pulse="workflowStep === 3"
+                        />
+                    </div>
+
+                    <!-- Step 4 & 7: Done / Next Prep -->
+                    <div class="col-12 col-md-4">
+                        <q-btn
+                            :label="workflowStep === 7 ? 'NEXT PREP' : t('prodPlan.done')"
+                            :color="(workflowStep === 7 || (workflowStep === 4 && isPackagedVolumeInTol)) ? 'green-9' : 'grey-4'"
+                            :text-color="(workflowStep === 7 || (workflowStep === 4 && isPackagedVolumeInTol)) ? 'white' : 'grey-7'"
+                            :icon="workflowStep === 7 ? 'forward' : 'check_circle'"
+                            class="full-width"
+                            style="height: 44px"
+                            unelevated
+                            @click="workflowStep === 7 ? handleStep7Confirm(true) : handleDoneClick()"
+                            :disable="(workflowStep !== 4 && workflowStep !== 7) || (workflowStep === 4 && !isPackagedVolumeInTol)"
+                        />
+                    </div>
+
                 </div>
             </q-card-section>
         </q-card>

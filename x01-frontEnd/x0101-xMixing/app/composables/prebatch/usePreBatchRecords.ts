@@ -52,20 +52,20 @@ export function usePreBatchRecords(deps: RecordDeps) {
 
     const totalCompletedWeight = computed(() => {
         if (!deps.selectedBatch.value || !deps.selectedReCode.value) return 0
-        const batchId = deps.selectedBatch.value.batch_id
-        const ingLogs = preBatchLogs.value.filter(log =>
-            log.re_code === deps.selectedReCode.value &&
-            log.batch_record_id.startsWith(batchId)
-        )
-        return ingLogs.reduce((sum, log) => sum + (Number(log.net_volume) || 0), 0)
+        const currentBatchId = deps.selectedBatch.value.batch_id
+        return preBatchLogs.value.reduce((sum, log) => {
+            if (log.re_code === deps.selectedReCode.value && log.batch_record_id.startsWith(currentBatchId)) {
+                return sum + (Number(log.net_volume) || 0)
+            }
+            return sum
+        }, 0)
     })
 
     const completedCount = computed(() => {
         if (!deps.selectedBatch.value || !deps.selectedReCode.value) return 0
-        const batchId = deps.selectedBatch.value.batch_id
+        const currentBatchId = deps.selectedBatch.value.batch_id
         return preBatchLogs.value.filter(log =>
-            log.re_code === deps.selectedReCode.value &&
-            log.batch_record_id.startsWith(batchId)
+            log.re_code === deps.selectedReCode.value && log.batch_record_id.startsWith(currentBatchId)
         ).length
     })
 
@@ -162,13 +162,12 @@ export function usePreBatchRecords(deps: RecordDeps) {
     }
 
     // --- Watchers ---
-    watch([preBatchLogs, () => deps.selectedBatch.value], ([logs, batch]) => {
-        if (!logs || !batch) {
-            deps.selectableIngredients.value.forEach((ing: any) => ing.isDone = false)
+    watch([preBatchLogs, () => deps.selectedBatch.value, () => deps.selectableIngredients.value], ([logs, batch, ingredients]) => {
+        if (!logs || !batch || !ingredients || ingredients.length === 0) {
             return
         }
         let allDone = true
-        deps.selectableIngredients.value.forEach((ing: any) => {
+        ingredients.forEach((ing: any) => {
             const ingLogs = (logs as any[]).filter(l => l.re_code === ing.re_code && l.batch_record_id.startsWith(batch.batch_id))
             if (ingLogs.length > 0) {
                 const maxPkg = Math.max(...ingLogs.map(l => l.package_no || 0))
@@ -184,7 +183,8 @@ export function usePreBatchRecords(deps: RecordDeps) {
                 allDone = false
             }
         })
-        if (deps.selectableIngredients.value.length > 0 && allDone && !batch.batch_prepare) {
+        if (allDone && !batch.batch_prepare) {
+            console.log(`[Records] Batch ${batch.batch_id} is complete. Finalizing...`)
             deps.finalizeBatchPreparation(batch.id)
         }
     }, { deep: true })

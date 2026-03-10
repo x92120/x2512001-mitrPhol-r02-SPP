@@ -180,10 +180,12 @@ export function usePreBatchInventory(deps: InventoryDeps) {
         if (list.length === 0) return false
         const fifoItem = list[0]
         if (!fifoItem || !fifoItem.expire_date) return true
-        const d1 = formatDate(item.expire_date)
-        const fifoDate = formatDate(fifoItem.expire_date)
-        if (!d1 || !fifoDate) return true
-        return d1 <= fifoDate
+
+        const dateItem = new Date(item.expire_date).getTime()
+        const dateFifo = new Date(fifoItem.expire_date).getTime()
+
+        // If the scanned item's expiry is the same as or earlier than the FIFO item's expiry, it's compliant.
+        return dateItem <= dateFifo
     }
 
     const sortedAllInventory = computed(() => {

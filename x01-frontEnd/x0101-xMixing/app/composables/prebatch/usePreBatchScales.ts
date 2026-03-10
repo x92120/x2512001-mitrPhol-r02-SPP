@@ -91,21 +91,20 @@ export function usePreBatchScales(deps: ScaleDeps) {
     })
 
     const remainVolume = computed(() => {
-        return Math.max(0, deps.requireVolume.value - batchedVolume.value)
+        // Total needed - (sum of previous packages) - (current scale value)
+        return Math.max(0, deps.requireVolume.value - totalCompletedWeight.value - actualScaleValue.value)
     })
 
     const totalCompletedWeight = ref(0) // Set by records composable
     const completedCount = ref(0) // Set by records composable
     const nextPackageNo = ref(1) // Set by records composable
-
-    const remainToBatch = computed(() => {
-        return Math.max(0, deps.requireVolume.value - totalCompletedWeight.value - actualScaleValue.value)
-    })
+    // Used to freeze the value for Step 7 display so it doesn't show negative when bag is removed
+    const lastCapturedWeight = ref(0)
 
     const targetWeight = computed(() => {
         if (deps.requireVolume.value <= 0 || deps.packageSize.value <= 0) return 0
-        const remainAfterCompleted = Math.max(0, deps.requireVolume.value - totalCompletedWeight.value)
-        return Math.min(remainAfterCompleted, deps.packageSize.value)
+        const remainForIngredient = Math.max(0, deps.requireVolume.value - totalCompletedWeight.value)
+        return Math.min(remainForIngredient, deps.packageSize.value)
     })
 
     const requestBatch = computed(() => {
@@ -120,12 +119,32 @@ export function usePreBatchScales(deps: ScaleDeps) {
     })
 
     const isPackagedVolumeInTol = computed(() => {
-        if (!activeScale.value || targetWeight.value <= 0) return false
-        const diff = Math.abs(targetWeight.value - batchedVolume.value)
-        return diff <= activeScale.value.tolerance
+        if (!activeScale.value || deps.requireVolume.value <= 0) return false
+
+        const totalReq = deps.requireVolume.value
+        const currentSum = totalCompletedWeight.value + batchedVolume.value
+        const tol = activeScale.value.tolerance
+
+        const diff = Math.abs(totalReq - currentSum)
+
+        // Success if total reached within specific scale tolerance
+        if (diff <= tol && currentSum > 0) return true
+
+        // Check if current individual package matches target
+        if (targetWeight.value > 0) {
+            const pkgDiff = Math.abs(targetWeight.value - batchedVolume.value)
+            if (pkgDiff <= tol) return true
+        }
+
+        return false
     })
 
     const packagedVolumeBgColor = computed(() => {
+        const totalReq = deps.requireVolume.value
+        const currentSum = totalCompletedWeight.value + batchedVolume.value
+        const tol = activeScale.value?.tolerance || 0.01
+
+        if (Math.abs(totalReq - currentSum) <= tol && currentSum > 0) return 'green-13'
         if (batchedVolume.value <= 0) return 'grey-2'
         return isPackagedVolumeInTol.value ? 'green-13' : 'yellow-13'
     })
@@ -320,9 +339,11 @@ export function usePreBatchScales(deps: ScaleDeps) {
 
     watch(actualScaleValue, (newVal) => {
         if (deps.selectedReCode.value) {
+            // Keep actual value while weighing, but we'll show lastCapturedWeight in Step 7 UI
             batchedVolume.value = newVal
         } else {
             batchedVolume.value = 0
+            lastCapturedWeight.value = 0
         }
     }, { immediate: true })
 
@@ -345,11 +366,11 @@ export function usePreBatchScales(deps: ScaleDeps) {
         totalCompletedWeight,
         completedCount,
         nextPackageNo,
+        lastCapturedWeight,
         // Computed
         activeScale,
         actualScaleValue,
         remainVolume,
-        remainToBatch,
         targetWeight,
         requestBatch,
         isToleranceExceeded,

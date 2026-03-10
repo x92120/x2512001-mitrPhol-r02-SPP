@@ -29,6 +29,7 @@ export interface LabelDeps {
     currentPackageOrigins: any
     preBatchLogs: any
     selectedPreBatchLogs: any
+    prebatchItems: any
     // Functions from other composables
     getPackagePlan: (batchId: string, reCode: string, requiredVolume: number) => any[]
     fetchPreBatchRecords: () => Promise<void>
@@ -41,6 +42,7 @@ export interface LabelDeps {
     selectedIntakeLotId: any
     selectedInventoryItem: any
     productionPlans: any
+    ingredientBatchDetail?: any
 }
 
 export function usePreBatchLabels(deps: LabelDeps) {
@@ -188,9 +190,12 @@ export function usePreBatchLabels(deps: LabelDeps) {
                 throw new Error('Invalid package numbers')
             }
             const ing = deps.ingredients.value.find((i: any) => i.re_code === deps.selectedReCode.value)
-            const itemId = deps.selectedRequirementId.value  // prebatch_items.id
+            const itemId = deps.selectedRequirementId.value
+            const doneBatchId = deps.selectedBatch.value.batch_id
+            const doneReCode = deps.selectedReCode.value
+
             const recordData = {
-                batch_record_id: `${deps.selectedBatch.value.batch_id}-${deps.selectedReCode.value}-${pkgNo}`,
+                batch_record_id: `${doneBatchId}-${doneReCode}-${pkgNo}`,
                 net_volume: capturedScaleValue.value,
                 package_no: pkgNo,
                 total_packages: totalPkgs,
@@ -210,21 +215,47 @@ export function usePreBatchLabels(deps: LabelDeps) {
             }
             $q.notify({ type: 'positive', message: t('preBatch.saveAndPrintSuccess'), position: 'top' })
             await deps.fetchPreBatchRecords()
+
             if (pkgNo >= totalPkgs) {
                 $q.notify({ type: 'info', message: t('preBatch.allPkgsCompleted') })
-                if (deps.selectedBatch.value) {
-                    const doneBatchId = deps.selectedBatch.value.batch_id
-                    const doneReCode = deps.selectedReCode.value
-                    await deps.updatePrebatchItemStatus(doneBatchId, doneReCode, 2)
-                    await deps.onBatchExpand({ batch_id: doneBatchId })
-                    const plan = deps.productionPlans.value.find((p: any) => p.plan_id === deps.selectedProductionPlan.value)
-                    if (plan) await deps.onPlanShow(plan)
-                    await deps.advanceToNextBatch(doneBatchId, doneReCode)
+                await deps.updatePrebatchItemStatus(doneBatchId, doneReCode, 2)
+                await deps.onBatchExpand({ batch_id: doneBatchId })
+
+                // Refresh plan summary without clearing the selection
+                const summaryData = await $fetch<any[]>(`${appConfig.apiBaseUrl}/prebatch-items/summary-by-plan/${deps.selectedProductionPlan.value}`, {
+                    headers: getAuthHeader() as Record<string, string>
+                })
+
+                deps.prebatchItems.value = summaryData.map((item: any) => ({
+                    id: item.id || null,
+                    re_code: item.re_code || '-',
+                    ingredient_name: item.ingredient_name || item.name || '-',
+                    total_require: item.total_required ?? item.required_volume ?? 0,
+                    total_packaged: item.total_packaged || 0,
+                    wh: item.wh || item.warehouse || '-',
+                    status: item.status ?? 0,
+                    batch_count: item.batch_count || 1,
+                    per_batch: item.per_batch || item.required_volume || 0,
+                    completed_batches: item.completed_batches || 0
+                }))
+
+                // Refresh the expanded detail for the current ingredient to update Wait/Done status
+                if (deps.ingredientBatchDetail) {
+                    const reCode = doneReCode
+                    const planId = deps.selectedProductionPlan.value
+                    try {
+                        const detailData = await $fetch<any[]>(
+                            `${appConfig.apiBaseUrl}/prebatch-items/batches-by-ingredient/${planId}/${encodeURIComponent(reCode)}`,
+                            { headers: getAuthHeader() as Record<string, string> }
+                        )
+                        deps.ingredientBatchDetail.value[reCode] = detailData
+                    } catch (e) {
+                        console.error('Error refreshing ingredient detail:', e)
+                    }
                 }
             }
             showLabelDialog.value = false
             deps.currentPackageOrigins.value = []
-            deps.selectedIntakeLotId.value = ''
         } catch (error) {
             console.error('Error saving prebatch record:', error)
             $q.notify({ type: 'negative', message: 'Failed to save record' })
@@ -400,13 +431,10 @@ export function usePreBatchLabels(deps: LabelDeps) {
         }
     }
 
-    const onDone = async () => {
+    const onDone = async (autoPrintFlag = false) => {
         if (!deps.selectedReCode.value) {
             $q.notify({ type: 'warning', message: 'Please select an ingredient first' })
             return
-        }
-        if (deps.requestBatch.value > 0) {
-            // completedCount handled by records composable - check via preBatchLogs
         }
         const remainder = deps.getOriginDelta()
         if (remainder > 0.0001) {
@@ -422,7 +450,12 @@ export function usePreBatchLabels(deps: LabelDeps) {
             return
         }
         capturedScaleValue.value = deps.currentPackageOrigins.value.reduce((s: number, o: any) => s + o.take_volume, 0)
-        openLabelDialog()
+
+        if (autoPrintFlag) {
+            await onPrintLabel()
+        } else {
+            openLabelDialog()
+        }
     }
 
     // --- Watchers ---

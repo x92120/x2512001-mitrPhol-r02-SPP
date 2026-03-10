@@ -164,7 +164,8 @@ export function usePreBatchIngredients(deps: IngredientDeps) {
 
     const getPackagePlan = (batchId: string, reCode: string, requiredVolume: number) => {
         const ingInfo = deps.ingredients.value.find((i: any) => i.re_code === reCode)
-        let pkgSize = ingInfo?.std_package_size || deps.packageSize.value || 0
+        // Prioritize current manual selection (deps.packageSize) over master data default
+        let pkgSize = deps.packageSize.value || ingInfo?.std_package_size || 0
         if (requiredVolume <= 0) return []
         if (pkgSize <= 0) pkgSize = requiredVolume
         const totalPkgs = Math.ceil(requiredVolume / pkgSize)
@@ -313,11 +314,14 @@ export function usePreBatchIngredients(deps: IngredientDeps) {
     }
 
     // --- Watchers ---
+    // Selection should be managed by the workflow, not side-effects of list updates
+    /*
     watch(selectableIngredients, (newList) => {
         if (deps.selectedReCode.value && !newList.some(i => i.re_code === deps.selectedReCode.value)) {
             deps.selectedReCode.value = ''
         }
     })
+    */
 
     return {
         // State

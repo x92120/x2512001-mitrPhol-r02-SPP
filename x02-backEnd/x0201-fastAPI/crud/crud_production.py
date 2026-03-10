@@ -143,19 +143,35 @@ def create_production_plan(db: Session, plan_data: schemas.ProductionPlanCreate)
                 db.flush()
 
                 for re_code, info in ingredient_template.items():
+                    vol = round(info['qty'], 4)
+                    
+                    # Legacy table
                     db_req = models.PreBatchReq(
                         batch_db_id=db_batch.id,
                         plan_id=db_plan.plan_id,
                         batch_id=batch_id_str,
                         re_code=re_code,
                         ingredient_name=info['name'],
-                        required_volume=round(info['qty'], 4),
+                        required_volume=vol,
                         wh=info['wh'],
                         status=0
                     )
                     db.add(db_req)
 
-        # Single commit for everything: plan + history + batches + requirements
+                    # New unified table (Required for frontend)
+                    db_item = models.PreBatchItem(
+                        batch_db_id=db_batch.id,
+                        plan_id=db_plan.plan_id,
+                        batch_id=batch_id_str,
+                        re_code=re_code,
+                        ingredient_name=info['name'],
+                        required_volume=vol,
+                        wh=info['wh'],
+                        status=0
+                    )
+                    db.add(db_item)
+
+        # Single commit for everything: plan + history + batches + requirements + items
         db.commit()
         db.refresh(db_plan)
             

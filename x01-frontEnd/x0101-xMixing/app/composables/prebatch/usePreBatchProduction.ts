@@ -16,6 +16,7 @@ export interface ProductionDeps {
     packageSize: any
     selectedReCode: any
     selectedRequirementId: any
+    selectedIntakeLotId?: any
     isBatchSelected: any
     selectedWarehouse: any
     // Functions from other composables
@@ -257,24 +258,40 @@ export function usePreBatchProduction(deps: ProductionDeps) {
         // Try using ingredientBatchDetail first (ingredient-driven workflow)
         const batchDetails = deps.ingredientBatchDetail?.value?.[reCode] || []
         if (batchDetails.length > 0) {
-            const currentIdx = batchDetails.findIndex((bd: any) => bd.batch_id === currentBatchId)
+            // Find current index using fuzzy match for suffixes
+            let currentIdx = batchDetails.findIndex((bd: any) => bd.batch_id === currentBatchId || currentBatchId.startsWith(bd.batch_id))
+
+            // If still not found, try finding the first non-completed item as a safe fallback
+            if (currentIdx === -1) {
+                console.warn(`[Production] could not find EXACT match for ${currentBatchId} in details. Fallback to first.`)
+                currentIdx = -1 // Start searching from beginning
+            }
+
             for (let i = currentIdx + 1; i < batchDetails.length; i++) {
                 const nextBd = batchDetails[i]
                 if (nextBd.status !== 2) {
-                    // Set weighing data directly
+                    // Update global batch index so selectedBatch.value changes
+                    const globalIdx = filteredBatches.value.findIndex(b => b.batch_id === nextBd.batch_id)
+                    if (globalIdx !== -1) {
+                        selectedBatchIndex.value = globalIdx
+                    }
+
                     deps.selectedReCode.value = reCode
                     deps.selectedRequirementId.value = nextBd.req_id
                     deps.isBatchSelected.value = true
                     deps.requireVolume.value = nextBd.required_volume || 0
+
                     const ingInfo = deps.ingredients.value.find((i: any) => i.re_code === reCode)
                     if (ingInfo?.std_package_size && ingInfo.std_package_size > 0) {
                         deps.packageSize.value = ingInfo.std_package_size
                     }
                     await deps.fetchPreBatchRecords()
+                    await deps.fetchPrebatchItems(nextBd.batch_id)
                     $q.notify({ type: 'info', message: `Next batch: ${nextBd.batch_id}`, position: 'top', timeout: 2000 })
                     return
                 }
             }
+            if (deps.selectedIntakeLotId) deps.selectedIntakeLotId.value = ''
             $q.notify({ type: 'positive', message: `All batches completed for ${reCode}!`, position: 'top', timeout: 3000 })
             return
         }
@@ -282,21 +299,27 @@ export function usePreBatchProduction(deps: ProductionDeps) {
         // Fallback: use plan.batches
         const plan = productionPlans.value.find(p => p.plan_id === selectedProductionPlan.value)
         if (!plan || !plan.batches) return
-        const currentIdx = plan.batches.findIndex((b: any) => b.batch_id === currentBatchId)
-        if (currentIdx < 0) return
+
+        // Fuzzy match for currentIdx
+        let currentIdx = plan.batches.findIndex((b: any) => b.batch_id === currentBatchId || currentBatchId.startsWith(b.batch_id))
+
         for (let i = currentIdx + 1; i < plan.batches.length; i++) {
             const nextBatch = plan.batches[i]
-            if (nextBatch.batch_prepare) continue
+            // CRITICAL: Even if marked Prepared, we should check if OUR ingredient is done.
+            // Some batches are prematurely marked Prepared due to other ingredients being finished.
+
             if (!batchIngredients.value[nextBatch.batch_id]) {
                 await onBatchExpand(nextBatch)
             }
             const nextReq = batchIngredients.value[nextBatch.batch_id]?.find((r: any) => r.re_code === reCode && r.status !== 2)
             if (nextReq) {
                 await onBatchIngredientClick(nextBatch, nextReq, plan)
+                await deps.fetchPrebatchItems(nextBatch.batch_id)
                 $q.notify({ type: 'info', message: `Next batch: ${nextBatch.batch_id}`, position: 'top', timeout: 2000 })
                 return
             }
         }
+        if (deps.selectedIntakeLotId) deps.selectedIntakeLotId.value = ''
         $q.notify({ type: 'positive', message: `All batches completed for ${reCode}!`, position: 'top', timeout: 3000 })
     }
 
