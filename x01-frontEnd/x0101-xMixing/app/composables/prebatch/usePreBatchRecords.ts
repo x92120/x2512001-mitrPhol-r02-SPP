@@ -170,9 +170,11 @@ export function usePreBatchRecords(deps: RecordDeps) {
         ingredients.forEach((ing: any) => {
             const ingLogs = (logs as any[]).filter(l => l.re_code === ing.re_code && l.batch_record_id.startsWith(batch.batch_id))
             if (ingLogs.length > 0) {
-                const maxPkg = Math.max(...ingLogs.map(l => l.package_no || 0))
-                const totalPkgs = ingLogs[0]?.total_packages || 0
-                if (maxPkg >= totalPkgs && totalPkgs > 0) {
+                const totalPackaged = ingLogs.reduce((acc, log) => acc + (Number(log.net_volume) || 0), 0)
+                const required = Number(ing.batch_require || ing.required_volume || ing.per_batch || 0)
+
+                // The request volume and weight volume must be the exact same (diff essentially 0)
+                if (required > 0 && Math.abs(totalPackaged - required) <= 0.0001) {
                     ing.isDone = true
                 } else {
                     ing.isDone = false

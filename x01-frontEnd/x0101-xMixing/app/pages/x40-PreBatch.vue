@@ -220,6 +220,7 @@ const {
   currentPackageOrigins,
   preBatchLogs,
   selectedPreBatchLogs,
+  totalCompletedWeight,
   getPackagePlan,
   fetchPreBatchRecords,
   fetchPrebatchItems,

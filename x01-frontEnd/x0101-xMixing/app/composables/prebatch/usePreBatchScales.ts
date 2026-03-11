@@ -23,39 +23,39 @@ export function usePreBatchScales(deps: ScaleDeps) {
     const scales = ref([
         {
             id: 1,
-            label: 'Scale 1 (10 Kg +/- 0.01)',
+            label: 'Scale 1 (10 Kg +/- 0)',
             value: 0.0,
             displayValue: '0.0000',
             unit: 'kg',
             targetScaleId: 'scale-01',
             connected: false,
-            tolerance: 0.01,
+            tolerance: 0.00001, // internal tiny epsilon to prevent floating precise failure, practically 0
             precision: 4,
             isStable: true,
             isError: false
         },
         {
             id: 2,
-            label: 'Scale 2 (30 Kg +/- 0.02)',
+            label: 'Scale 2 (30 Kg +/- 0)',
             value: 0.0,
             displayValue: '0.0000',
             unit: 'kg',
             targetScaleId: 'scale-02',
             connected: false,
-            tolerance: 0.02,
+            tolerance: 0.00001,
             precision: 4,
             isStable: true,
             isError: false
         },
         {
             id: 3,
-            label: 'Scale 3 (150 Kg +/- 0.5)',
+            label: 'Scale 3 (150 Kg +/- 0)',
             value: 0.0,
             displayValue: '0.000',
             unit: 'kg',
             targetScaleId: 'scale-03',
             connected: false,
-            tolerance: 0.5,
+            tolerance: 0.00001,
             precision: 3,
             isStable: true,
             isError: false
@@ -142,7 +142,7 @@ export function usePreBatchScales(deps: ScaleDeps) {
     const packagedVolumeBgColor = computed(() => {
         const totalReq = deps.requireVolume.value
         const currentSum = totalCompletedWeight.value + batchedVolume.value
-        const tol = activeScale.value?.tolerance || 0.01
+        const tol = activeScale.value?.tolerance || 0.00001
 
         if (Math.abs(totalReq - currentSum) <= tol && currentSum > 0) return 'green-13'
         if (batchedVolume.value <= 0) return 'grey-2'

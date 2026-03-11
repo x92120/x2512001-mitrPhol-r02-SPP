@@ -30,6 +30,7 @@ export interface LabelDeps {
     preBatchLogs: any
     selectedPreBatchLogs: any
     prebatchItems: any
+    totalCompletedWeight: any
     // Functions from other composables
     getPackagePlan: (batchId: string, reCode: string, requiredVolume: number) => any[]
     fetchPreBatchRecords: () => Promise<void>
@@ -216,7 +217,8 @@ export function usePreBatchLabels(deps: LabelDeps) {
             $q.notify({ type: 'positive', message: t('preBatch.saveAndPrintSuccess'), position: 'top' })
             await deps.fetchPreBatchRecords()
 
-            if (pkgNo >= totalPkgs) {
+            const totalWeightSoFar = deps.totalCompletedWeight.value + capturedScaleValue.value
+            if (Math.abs(deps.requireVolume.value - totalWeightSoFar) <= 0.0001) {
                 $q.notify({ type: 'info', message: t('preBatch.allPkgsCompleted') })
                 await deps.updatePrebatchItemStatus(doneBatchId, doneReCode, 2)
                 await deps.onBatchExpand({ batch_id: doneBatchId })
