@@ -1139,6 +1139,21 @@ const onScanInputEnter = async (wh: 'FH' | 'SPP') => {
   else scanSPP.value = ''
 }
 
+// Auto-detect barcode scanner paste (comma-separated data) — no Enter key needed
+let _scanDebounceTimer: ReturnType<typeof setTimeout> | null = null
+watch(scanFH, (val) => {
+  if (_scanDebounceTimer) clearTimeout(_scanDebounceTimer)
+  if (val && val.includes(',')) {
+    _scanDebounceTimer = setTimeout(() => { onScanInputEnter('FH') }, 300)
+  }
+})
+watch(scanSPP, (val) => {
+  if (_scanDebounceTimer) clearTimeout(_scanDebounceTimer)
+  if (val && val.includes(',')) {
+    _scanDebounceTimer = setTimeout(() => { onScanInputEnter('SPP') }, 300)
+  }
+})
+
 // Watch for MQTT scans — smart routing: intake ID vs batch ID
 watch(lastScan, async (scan) => {
   if (!scan?.barcode) return
