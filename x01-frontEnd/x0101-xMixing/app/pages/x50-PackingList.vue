@@ -827,6 +827,14 @@ const onCloseBox = (wh: 'FH' | 'SPP') => {
       await fetchAllRecords() // Refresh middle panel
       await fetchReadyToDeliver()
       console.log(`[CloseBox] Data refreshed. Transferred boxes:`, transferredBoxes.value.length)
+
+      // Reset all state — wait for next box scan
+      currentBoxScans.value = []
+      selectedBatch.value = null
+      scanBatchId.value = ''
+      batchRecords.value = []
+      scanFH.value = ''
+      scanSPP.value = ''
     } catch (e) {
       console.error('Error closing box:', e)
       $q.notify({ type: 'negative', message: `Failed to close ${wh} box for ${batchId}` })
