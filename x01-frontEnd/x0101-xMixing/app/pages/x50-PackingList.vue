@@ -1002,7 +1002,8 @@ const processBagScan = async (rawScan: string) => {
 
       // Reconstruct prebatch_id with dashes: batchId-reCode-recodeBatchId
       if (batchId && reCode && concatId) {
-        const suffix = concatId.replace(batchId, '').replace(reCode, '')
+        const rawSuffix = concatId.replace(batchId, '').replace(reCode, '')
+        const suffix = rawSuffix.replace(/^0+/, '') || '0' // Strip leading zeros: "01" → "1"
         barcode = `${batchId}-${reCode}-${suffix}`
       } else {
         barcode = concatId || batchId
@@ -1111,6 +1112,10 @@ const processBagScan = async (rawScan: string) => {
           body: { packing_status: 1, packed_by: 'operator' },
         })
         item.packing_status = 1
+        // Add to current box visually
+        if (!currentBoxScans.value.some((b: any) => b.id === item.id)) {
+          currentBoxScans.value.push(item)
+        }
         $q.notify({
           type: 'positive',
           icon: 'check_circle',
