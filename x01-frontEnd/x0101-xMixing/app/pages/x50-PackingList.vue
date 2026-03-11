@@ -979,12 +979,23 @@ const onScanInputEnter = async (wh: 'FH' | 'SPP') => {
   let scanValue = wh === 'FH' ? scanFH.value.trim() : scanSPP.value.trim()
   if (!scanValue) return
 
+  let batchIdFromScan = null
+
   // Parse comma-separated barcode format (e.g. PlanID,PreBatchID,,ReCode,Weight)
   if (scanValue.includes(',')) {
     const parts = scanValue.split(',')
-    if (parts.length > 1) {
-      scanValue = parts[1].trim()
+    if (parts.length > 2) {
+      batchIdFromScan = parts[1]?.trim() || ''
+      scanValue = parts[2]?.trim() || ''
+    } else if (parts.length > 1) {
+      scanValue = parts[1]?.trim() || ''
     }
+  }
+
+  // Auto Select Box if not selected or different from current scan
+  if (batchIdFromScan && (!selectedBatch.value || selectedBatch.value?.batch_id !== batchIdFromScan)) {
+    scanBatchId.value = batchIdFromScan
+    onScanBatchEnter()
   }
 
   if (!selectedBatch.value) {
@@ -1061,13 +1072,23 @@ const onScanInputEnter = async (wh: 'FH' | 'SPP') => {
 watch(lastScan, async (scan) => {
   if (!scan?.barcode) return
   let barcode = scan.barcode.trim()
+  let batchIdFromScan = null
 
   // Parse comma-separated barcode format (e.g. PlanID,PreBatchID,,ReCode,Weight)
   if (barcode.includes(',')) {
     const parts = barcode.split(',')
-    if (parts.length > 1) {
-      barcode = parts[1].trim()
+    if (parts.length > 2) {
+      batchIdFromScan = parts[1]?.trim() || ''
+      barcode = parts[2]?.trim() || ''
+    } else if (parts.length > 1) {
+      barcode = parts[1]?.trim() || ''
     }
+  }
+
+  // Auto Select Box if not selected or different from current scan
+  if (batchIdFromScan && (!selectedBatch.value || selectedBatch.value?.batch_id !== batchIdFromScan)) {
+    scanBatchId.value = batchIdFromScan
+    onScanBatchEnter()
   }
 
   // If a batch is selected, try to match as intake ID first
@@ -1589,20 +1610,21 @@ onMounted(async () => {
           
           <!-- Compact Batch Scanner + Info -->
           <q-card-section class="q-py-xs q-px-sm">
-            <q-input
-              v-model="scanBatchId" outlined dense
-              :placeholder="t('packingList.scanBoxLabel')"
-              bg-color="grey-1"
-              @keyup.enter="onScanBatchEnter"
-              style="font-size:0.8rem"
+            <div
+              v-if="selectedBatch"
+              class="q-pa-sm bg-grey-2 text-indigo-9 text-weight-bold row items-center no-wrap"
+              style="border: 1px solid #ccc; border-radius: 4px; font-size: 0.85rem; min-height: 38px;"
             >
-              <template v-slot:prepend>
-                <q-icon name="qr_code_scanner" color="indigo" size="xs" />
-              </template>
-              <template v-slot:append>
-                <q-btn flat round dense icon="search" color="indigo" size="xs" @click="onScanBatchEnter" />
-              </template>
-            </q-input>
+              {{ selectedBatch.batch_id }}
+              <span v-if="filterMiddleWh !== 'ALL'"> &nbsp;{ {{ filterMiddleWh }} }</span>
+            </div>
+            <div
+              v-else
+              class="q-pa-sm bg-grey-1 text-grey-6 text-italic row items-center no-wrap"
+              style="border: 1px dashed #ccc; border-radius: 4px; font-size: 0.85rem; min-height: 38px;"
+            >
+              Auto filled when first ingredient scanned...
+            </div>
             <div v-if="batchInfo" class="row items-center q-gutter-x-sm q-mt-xs" style="font-size:0.7rem">
               <span class="text-weight-bold">{{ batchInfo.sku_name }}</span>
               <span class="text-grey-6">|</span>
