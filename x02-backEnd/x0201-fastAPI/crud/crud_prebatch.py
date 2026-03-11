@@ -115,8 +115,16 @@ def create_prebatch_rec(db: Session, record: schemas.PreBatchRecCreate) -> model
         if db_record.req_id:
             req = db.query(models.PreBatchReq).filter(models.PreBatchReq.id == db_record.req_id).first()
             if req:
-                if db_record.package_no and db_record.total_packages and db_record.package_no >= db_record.total_packages:
-                    req.status = 2  # Completed
+                if db_record.total_packages:
+                    # Count how many actual records exist for this requirement
+                    actual_count = db.query(models.PreBatchRec).filter(
+                        models.PreBatchRec.req_id == db_record.req_id,
+                        models.PreBatchRec.net_volume.isnot(None),
+                    ).count()
+                    if actual_count >= db_record.total_packages:
+                        req.status = 2  # Completed — ALL packages packed
+                    elif req.status == 0:
+                        req.status = 1  # In-Progress
                 elif req.status == 0:
                     req.status = 1  # In-Progress
 
