@@ -132,10 +132,10 @@ class IngredientIntakeListBase(BaseModel):
     re_code: Optional[str] = Field(None, max_length=50)
     material_description: Optional[str] = Field(None, max_length=200) # Merged
     uom: Optional[str] = Field(None, max_length=20) # Merged
-    intake_vol: float = Field(..., ge=0)
-    remain_vol: float = Field(..., ge=0)
-    intake_package_vol: Optional[float] = Field(None, ge=0)
-    package_intake: Optional[int] = Field(None, ge=0)
+    intake_vol: float = Field(...)
+    remain_vol: float = Field(...)
+    intake_package_vol: Optional[float] = Field(None)
+    package_intake: Optional[int] = Field(None)
     expire_date: Optional[datetime] = None
     status: str = Field("Active", max_length=20)
     intake_by: str = Field(..., min_length=1, max_length=50)
