@@ -974,63 +974,112 @@ const onSimScanClick = async (bag: any) => {
   showScanDialog.value = false
 }
 
-/** Handle scan input from FH/SPP scan fields — lookup by batch_record_id */
-const onScanInputEnter = async (wh: 'FH' | 'SPP') => {
-  let scanValue = wh === 'FH' ? scanFH.value.trim() : scanSPP.value.trim()
-  if (!scanValue) return
+/** 
+ * Shared logic for both text input scans and MQTT scans 
+ */
+const processBagScan = async (rawScan: string) => {
+  if (!rawScan) return
+  let barcode = rawScan
+  let inferredBatchId = null
 
-  let batchIdFromScan = null
-
-  // Parse comma-separated barcode format (e.g. PlanID,PreBatchID,,ReCode,Weight)
-  if (scanValue.includes(',')) {
-    const parts = scanValue.split(',')
+  // 1) Parse comma-separated barcode format (e.g. PlanID,PreBatchID,,ReCode,Weight)
+  if (rawScan.includes(',')) {
+    const parts = rawScan.split(',')
     if (parts.length > 2) {
-      batchIdFromScan = parts[1]?.trim() || ''
-      scanValue = parts[2]?.trim() || ''
+      inferredBatchId = parts[1]?.trim() || ''
+      barcode = parts[2]?.trim() || ''
     } else if (parts.length > 1) {
-      scanValue = parts[1]?.trim() || ''
+      barcode = parts[1]?.trim() || ''
     }
   }
 
-  // Auto Select Box if not selected or different from current scan
-  if (batchIdFromScan && (!selectedBatch.value || selectedBatch.value?.batch_id !== batchIdFromScan)) {
-    scanBatchId.value = batchIdFromScan
-    onScanBatchEnter()
+  // 2) If no batch ID parsed from commas, search across all plans/batches
+  if (!inferredBatchId) {
+    for (const plan of plans.value) {
+      for (const batch of plan.batches || []) {
+        if (rawScan.includes(batch.batch_id)) {
+          inferredBatchId = batch.batch_id
+          break
+        }
+      }
+      if (inferredBatchId) break
+    }
   }
 
+  // 3) Auto Select Box if not selected or different from current scan
+  if (inferredBatchId && (!selectedBatch.value || selectedBatch.value?.batch_id !== inferredBatchId)) {
+    scanBatchId.value = inferredBatchId
+    onScanBatchEnter() // Automatically loads the batch and displays req ingredients
+  }
+
+  // If STILL no batch selected, we cannot proceed
   if (!selectedBatch.value) {
-    playSound('wrong')
-    $q.notify({ type: 'negative', message: t('packingList.selectBatchFirst'), icon: 'warning', position: 'top' })
+    // Treat as raw batch ID scan fallback if it wasn't comma separated
+    if (!rawScan.includes(',')) {
+      scanBatchId.value = rawScan.trim()
+      onScanBatchEnter()
+      if (selectedBatch.value) return // Was purely a box select scan
+    }
+    
+    if (!selectedBatch.value) {
+      playSound('wrong')
+      $q.notify({ type: 'negative', message: t('packingList.selectBatchFirst'), icon: 'warning', position: 'top' })
+    }
     return
   }
 
-  // 1. Try to find in legacy bags (prebatch_recs via bagsByWarehouse)
-  const whBags = wh === 'FH' ? bagsByWarehouse.value.FH : bagsByWarehouse.value.SPP
-  const bag = whBags.find(b => 
-    b.batch_record_id === scanValue || 
-    b.id?.toString() === scanValue ||
-    b.intake_id === scanValue
-  )
+  // 4) Try to find the exact bag in the selected batch
+  const batchReqs = selectedBatch.value.reqs || []
+  const allBags = [...bagsByWarehouse.value.FH, ...bagsByWarehouse.value.SPP]
 
+  const searchForBag = (searchCode: string) => {
+    let b = allBags.find(x => x.batch_record_id === searchCode || x.id?.toString() === searchCode || x.intake_id === searchCode)
+    let i = batchReqs.find((r: any) => r.batch_record_id === searchCode)
+    return { b, i }
+  }
+
+  let bag = null
+  let item = null
+
+  let res = searchForBag(barcode)
+  bag = res.b
+  item = res.i
+
+  // Fallback: If not found and had commas, check all parts just in case
+  if (!bag && !item && rawScan.includes(',')) {
+    const parts = rawScan.split(',').map(p => p.trim())
+    for (const p of parts) {
+      if (!p) continue
+      let retryRes = searchForBag(p)
+      if (retryRes.b || retryRes.i) {
+        bag = retryRes.b
+        item = retryRes.i
+        barcode = p
+        break
+      }
+    }
+  }
+
+  if (!bag && !item) {
+    playSound('wrong')
+    $q.notify({ type: 'negative', icon: 'error', message: t('packingList.bagNotFound'), caption: barcode, position: 'top', timeout: 3000 })
+    return
+  }
+
+  // 5) Auto-fill Department (FH / SPP) based on scanned ingredient
+  const foundWh = bag ? bag.wh : (item?.wh)
+  if (foundWh && (foundWh === 'FH' || foundWh === 'SPP')) {
+    filterMiddleWh.value = foundWh
+  }
+
+  // 6) Process Packing
   if (bag) {
     if (isPacked(bag)) {
       $q.notify({ type: 'info', message: t('packingList.alreadyPacked'), caption: bag.batch_record_id, position: 'top', timeout: 2000 })
     } else {
-      await onSimScanClick(bag)
+      await onSimScanClick(bag) // Handles the frontend UI packing logic + notifying
     }
-    if (wh === 'FH') scanFH.value = ''
-    else scanSPP.value = ''
-    return
-  }
-
-  // 2. Fallback: find in prebatch_items (lower card) by batch_record_id
-  const batchReqs = selectedBatch.value.reqs || []
-  const whFilter = wh === 'FH' ? isFH : isSPP
-  const item = batchReqs.find((r: any) =>
-    whFilter(r.wh || '') && r.batch_record_id === scanValue
-  )
-
-  if (item) {
+  } else if (item) {
     if (item.packing_status === 1) {
       playSound('correct')
       $q.notify({ type: 'info', message: 'Already packed', caption: item.batch_record_id, position: 'top', timeout: 2000 })
@@ -1056,14 +1105,15 @@ const onScanInputEnter = async (wh: 'FH' | 'SPP') => {
         $q.notify({ type: 'negative', message: 'Failed to update packing status', position: 'top' })
       }
     }
-    if (wh === 'FH') scanFH.value = ''
-    else scanSPP.value = ''
-    return
   }
+}
 
-  // 3. Not found anywhere
-  playSound('wrong')
-  $q.notify({ type: 'negative', icon: 'error', message: t('packingList.bagNotFound'), caption: scanValue, position: 'top', timeout: 3000 })
+/** Handle scan input from FH/SPP scan fields via Keyboard */
+const onScanInputEnter = async (wh: 'FH' | 'SPP') => {
+  const scanValue = wh === 'FH' ? scanFH.value.trim() : scanSPP.value.trim()
+  if (scanValue) {
+    await processBagScan(scanValue)
+  }
   if (wh === 'FH') scanFH.value = ''
   else scanSPP.value = ''
 }
@@ -1071,64 +1121,7 @@ const onScanInputEnter = async (wh: 'FH' | 'SPP') => {
 // Watch for MQTT scans — smart routing: intake ID vs batch ID
 watch(lastScan, async (scan) => {
   if (!scan?.barcode) return
-  let barcode = scan.barcode.trim()
-  let batchIdFromScan = null
-
-  // Parse comma-separated barcode format (e.g. PlanID,PreBatchID,,ReCode,Weight)
-  if (barcode.includes(',')) {
-    const parts = barcode.split(',')
-    if (parts.length > 2) {
-      batchIdFromScan = parts[1]?.trim() || ''
-      barcode = parts[2]?.trim() || ''
-    } else if (parts.length > 1) {
-      barcode = parts[1]?.trim() || ''
-    }
-  }
-
-  // Auto Select Box if not selected or different from current scan
-  if (batchIdFromScan && (!selectedBatch.value || selectedBatch.value?.batch_id !== batchIdFromScan)) {
-    scanBatchId.value = batchIdFromScan
-    onScanBatchEnter()
-  }
-
-  // If a batch is selected, try to match as intake ID first
-  if (selectedBatch.value) {
-    // 1. Try legacy bags (prebatch_recs)
-    const allBags = [...bagsByWarehouse.value.FH, ...bagsByWarehouse.value.SPP]
-    const bag = allBags.find(b =>
-      b.batch_record_id === barcode ||
-      b.id?.toString() === barcode ||
-      b.intake_id === barcode
-    )
-    if (bag) {
-      onSimScanClick(bag)
-      return
-    }
-
-    // 2. Fallback: try prebatch_items (lower card)
-    const batchReqs = selectedBatch.value.reqs || []
-    const item = batchReqs.find((r: any) => r.batch_record_id === barcode)
-    if (item && item.packing_status !== 1) {
-      playSound('correct')
-      try {
-        await $fetch(`${appConfig.apiBaseUrl}/prebatch-items/${item.id}/packing-status`, {
-          method: 'PATCH',
-          headers: getAuthHeader() as Record<string, string>,
-          body: { packing_status: 1, packed_by: 'operator' },
-        })
-        item.packing_status = 1
-        $q.notify({ type: 'positive', icon: 'check_circle', message: `✅ ${item.re_code} packed`, caption: barcode, position: 'top', timeout: 2000 })
-      } catch (e) { console.error('MQTT scan packing error:', e) }
-      return
-    } else if (item && item.packing_status === 1) {
-      $q.notify({ type: 'info', message: 'Already packed', caption: barcode, position: 'top', timeout: 2000 })
-      return
-    }
-  }
-
-  // Otherwise, treat as batch ID scan
-  scanBatchId.value = barcode
-  onScanBatchEnter()
+  await processBagScan(scan.barcode.trim())
 })
 
 // Auto-close box when all bags for a warehouse are packed
