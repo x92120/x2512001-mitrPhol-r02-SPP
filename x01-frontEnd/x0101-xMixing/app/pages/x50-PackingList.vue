@@ -976,8 +976,16 @@ const onSimScanClick = async (bag: any) => {
 
 /** Handle scan input from FH/SPP scan fields — lookup by batch_record_id */
 const onScanInputEnter = async (wh: 'FH' | 'SPP') => {
-  const scanValue = wh === 'FH' ? scanFH.value.trim() : scanSPP.value.trim()
+  let scanValue = wh === 'FH' ? scanFH.value.trim() : scanSPP.value.trim()
   if (!scanValue) return
+
+  // Parse comma-separated barcode format (e.g. PlanID,PreBatchID,,ReCode,Weight)
+  if (scanValue.includes(',')) {
+    const parts = scanValue.split(',')
+    if (parts.length > 1) {
+      scanValue = parts[1].trim()
+    }
+  }
 
   if (!selectedBatch.value) {
     playSound('wrong')
@@ -1052,7 +1060,15 @@ const onScanInputEnter = async (wh: 'FH' | 'SPP') => {
 // Watch for MQTT scans — smart routing: intake ID vs batch ID
 watch(lastScan, async (scan) => {
   if (!scan?.barcode) return
-  const barcode = scan.barcode.trim()
+  let barcode = scan.barcode.trim()
+
+  // Parse comma-separated barcode format (e.g. PlanID,PreBatchID,,ReCode,Weight)
+  if (barcode.includes(',')) {
+    const parts = barcode.split(',')
+    if (parts.length > 1) {
+      barcode = parts[1].trim()
+    }
+  }
 
   // If a batch is selected, try to match as intake ID first
   if (selectedBatch.value) {
