@@ -140,7 +140,8 @@
         "sku.saveFailed": "Save failed",
         "sku.deleteFailed": "Delete failed",
         "sku.networkError": "Network error or server down",
-        "sku.exportFailed": "Export failed"
+        "sku.exportFailed": "Export failed",
+        "sku.setupStep": "Setup Step"
     },
     "th": {
         "sku.title": "SKU Masters",
@@ -283,6 +284,7 @@
         "sku.saveFailed": "บันทึกไม่สำเร็จ",
         "sku.deleteFailed": "ลบไม่สำเร็จ",
         "sku.networkError": "ข้อผิดพลาดเครือข่ายหรือเซิร์ฟเวอร์ไม่ทำงาน",
-        "sku.exportFailed": "ส่งออกไม่สำเร็จ"
+        "sku.exportFailed": "ส่งออกไม่สำเร็จ",
+        "sku.setupStep": "ขั้นตอนการเตรียมการ"
     }
 }

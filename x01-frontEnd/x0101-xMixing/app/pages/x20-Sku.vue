@@ -117,6 +117,7 @@ const expandedPhases = ref<{[key: string]: string[]}>({})
 
 // --- Lookups ---
 const skuActions = ref<SkuAction[]>([])
+const actionOptions = ref<{label: string, value: string}[]>([])
 const skuDestinations = ref<SkuDestination[]>([])
 const skuPhases = ref<SkuPhase[]>([])
 const skuGroups = ref<{ id: number, group_code: string, group_name: string, description?: string, status?: string }[]>([])
@@ -255,6 +256,7 @@ const stepForm = ref<SkuStep>({
   low_tol: 0.001,
   high_tol: 0.001,
   step_condition: '',
+  setup_step: '',
   agitator_rpm: 0,
   high_shear_rpm: 0,
   temperature: 0,
@@ -677,6 +679,7 @@ const addStep = (skuId: string) => {
     low_tol: 0.001,
     high_tol: 0.001,
     step_condition: '',
+    setup_step: '',
     agitator_rpm: 0,
     high_shear_rpm: 0,
     temperature: 0,
@@ -718,6 +721,7 @@ const addStepToPhase = (skuId: string, phaseNumber: string) => {
     low_tol: 0.001,
     high_tol: 0.001,
     step_condition: '',
+    setup_step: '',
     agitator_rpm: 0,
     high_shear_rpm: 0,
     temperature: 0,
@@ -740,7 +744,33 @@ const addStepToPhase = (skuId: string, phaseNumber: string) => {
   if (!expandedPhases.value[skuId].includes(phaseNumber)) expandedPhases.value[skuId].push(phaseNumber)
 }
 
-const onActionChange = (code: string) => { stepForm.value.action_description = skuActions.value.find(a => a.action_code === code)?.action_description || '' }
+const onActionChange = (code: string) => {
+  const action = skuActions.value.find(a => a.action_code === code)
+  if (action) {
+    stepForm.value.action_description = action.action_description
+    // If the manual description (action) is empty, fill it with action_description
+    if (!stepForm.value.action) {
+       stepForm.value.action = action.action_description
+    }
+  } else {
+    stepForm.value.action_description = ''
+  }
+}
+
+const filterActions = (val: string, update: any) => {
+  if (val === '') {
+    update(() => {
+      actionOptions.value = skuActions.value.map(a => ({ label: `${a.action_code} - ${a.action_description}`, value: a.action_code }))
+    })
+    return
+  }
+  update(() => {
+    const needle = val.toLowerCase()
+    actionOptions.value = skuActions.value
+      .filter(a => a.action_code.toLowerCase().includes(needle) || a.action_description.toLowerCase().includes(needle))
+      .map(a => ({ label: `${a.action_code} - ${a.action_description}`, value: a.action_code }))
+  })
+}
 const closeStepDialog = () => { showStepDialog.value = false; editingStep.value = null }
 
 const saveStep = async () => {
@@ -956,7 +986,14 @@ const deletePhaseSteps = (skuId: string, phaseNumber: string) => {
   })
 }
 
-const onIngredientChange = (reCode: string) => { /* Placeholder for future logic */ }
+const onIngredientChange = (reCode: string) => { 
+  const ing = ingredients.value.find(i => i.re_code === reCode)
+  if (ing) {
+    stepForm.value.ingredient_name = ing.name
+  } else {
+    stepForm.value.ingredient_name = ''
+  }
+}
 
 // ============================================================================
 // NAVIGATION & VIEW UTILITIES
@@ -1096,7 +1133,7 @@ const saveDuplicateSku = async () => {
 const masterColumns = computed<QTableColumn[]>(() => [
   { name: 'sku_id', label: t('sku.skuId'), field: 'sku_id', align: 'left' as const, sortable: true },
   { name: 'sku_name', label: t('sku.skuName'), field: 'sku_name', align: 'left' as const, sortable: true },
-  { name: 'sku_group', label: t('sku.skuGroup', 'Group'), field: 'sku_group_name', align: 'left' as const, sortable: true },
+  { name: 'sku_group', label: t('sku.skuGroup'), field: 'sku_group_name', align: 'left' as const, sortable: true },
   { name: 'std_batch', label: t('sku.stdBatch'), field: 'std_batch_size', align: 'right' as const, sortable: true },
   { name: 'phases', label: t('sku.phases'), field: 'total_phases', align: 'center' as const, sortable: true },
   { name: 'steps', label: t('sku.steps'), field: 'total_sub_steps', align: 'center' as const, sortable: true },
@@ -1148,8 +1185,9 @@ const printSkuReport = async (sku: SkuMaster) => {
   // Group steps by phase
   const phaseMap: { [key: string]: SkuStep[] } = {}
   steps.forEach(s => {
-    if (!phaseMap[s.phase_number]) phaseMap[s.phase_number] = []
-    phaseMap[s.phase_number].push(s)
+    const pn = s.phase_number || '1'
+    if (!phaseMap[pn]) phaseMap[pn] = []
+    phaseMap[pn].push(s)
   })
   const phases = Object.keys(phaseMap).sort()
 
@@ -1310,8 +1348,8 @@ const printSkuReport = async (sku: SkuMaster) => {
         <!-- Process Steps Detail -->
         <div class="section-title page-break">⚙️ Process Steps Detail</div>
 
-        ${phases.map(phaseNum => {
-          const phaseSteps = phaseMap[phaseNum]
+        ${phases.map((phaseNum: string) => {
+          const phaseSteps = phaseMap[phaseNum] || []
           const firstStep = phaseSteps[0]
           const phaseDesc = firstStep?.action || ''
           const phaseId = firstStep?.phase_id || ''
@@ -1889,9 +1927,14 @@ const printSkuReport = async (sku: SkuMaster) => {
 
                <template v-slot:body-cell-action_code="stepProps">
                   <q-td :props="stepProps">
-                    <q-badge color="blue-7" outline v-if="stepProps.row.action_code">
-                      {{ stepProps.row.action_code }}
-                    </q-badge>
+                    <div class="row no-wrap items-center q-gutter-x-xs">
+                      <q-badge color="blue-7" outline v-if="stepProps.row.action_code">
+                        {{ stepProps.row.action_code }}
+                      </q-badge>
+                      <q-icon v-if="stepProps.row.setup_step" name="settings_suggest" color="indigo-8" size="xs">
+                        <q-tooltip>{{ stepProps.row.setup_step }}</q-tooltip>
+                      </q-icon>
+                    </div>
                   </q-td>
                </template>
 
@@ -2023,16 +2066,19 @@ const printSkuReport = async (sku: SkuMaster) => {
                <q-separator class="q-mb-sm" />
             </div>
 
-                <div class="col-4">
+                <div class="col-12 col-md-4">
                     <q-select
                       v-model="stepForm.action_code"
-                      :options="skuActions.map(a => ({ label: `${a.action_code} - ${a.action_description}`, value: a.action_code }))"
+                      :options="actionOptions"
                       :label="t('sku.actionCode')"
                       outlined
                       dense
                       emit-value
                       map-options
                       clearable
+                      use-input
+                      input-debounce="0"
+                      @filter="filterActions"
                       @update:model-value="onActionChange"
                     >
                       <template v-slot:after>
@@ -2049,7 +2095,7 @@ const printSkuReport = async (sku: SkuMaster) => {
                       </template>
                     </q-select>
                 </div>
-                <div class="col-8">
+                <div class="col-12 col-md-8">
                   <q-input 
                     v-model="stepForm.action_description" 
                     :label="t('sku.actionDesc')" 
@@ -2059,6 +2105,17 @@ const printSkuReport = async (sku: SkuMaster) => {
                     bg-color="grey-2"
                     hint="Auto-filled from Action Code"
                   />
+                </div>
+
+                <div class="col-12">
+                   <q-input 
+                     v-model="stepForm.setup_step" 
+                     :label="t('sku.setupStep')" 
+                     outlined 
+                     dense
+                     placeholder="Setup tasks (e.g. Dry Mix, Check Valve)"
+                     hint="Specific preparation for this step"
+                   />
                 </div>
 
             <div class="col-12 col-sm-6">
@@ -2113,11 +2170,15 @@ const printSkuReport = async (sku: SkuMaster) => {
             </div>
             
              <div class="col-6 col-sm-2">
-              <q-input 
+              <q-select 
                 v-model="stepForm.uom" 
                 :label="t('sku.uom')" 
+                :options="['kg', 'L', 'unit', 'g', 'ml']"
                 outlined 
                 dense
+                use-input
+                input-debounce="0"
+                @filter="(val, update) => update(() => {})"
               />
             </div>
 
@@ -2341,10 +2402,15 @@ const printSkuReport = async (sku: SkuMaster) => {
               <div class="col-6">
                 <q-select
                   v-model="skuForm.uom"
-                  :options="['kg', 'L', 'unit']"
+                  :options="['kg', 'L', 'unit', 'g', 'ml']"
                   :label="t('sku.uom')"
                   outlined
                   dense
+                  use-input
+                  fill-input
+                  hide-selected
+                  input-debounce="0"
+                  @filter="(val, update) => update(() => {})"
                   :hint="t('sku.unitOfMeasure')"
                 />
               </div>
@@ -2355,10 +2421,13 @@ const printSkuReport = async (sku: SkuMaster) => {
               :options="[{label: '-- None --', value: null}, ...skuGroups.map(g => ({label: `${g.group_code} - ${g.group_name}`, value: g.id}))]"
               emit-value
               map-options
-              :label="t('sku.skuGroup', 'SKU Group')"
+              :label="t('sku.skuGroup')"
               outlined
               dense
               clearable
+              use-input
+              input-debounce="0"
+              @filter="(val, update) => update(() => {})"
               :hint="'Group for categorizing SKUs'"
             >
               <template v-slot:after>
