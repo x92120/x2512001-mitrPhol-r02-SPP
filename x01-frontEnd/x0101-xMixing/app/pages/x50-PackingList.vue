@@ -995,26 +995,36 @@ const processBagScan = async (rawScan: string) => {
   if (!rawScan) return
   let barcode = rawScan
   let inferredBatchId = null
+  let scannedReCode = ''
 
   // 1) Parse comma-separated barcode format:
-  //    seq, batchId, concatPrebatchId, reCode, weight
-  //    e.g. "9,P260311-03-03-001,P260311-03-03-001FV021A01,FV021A,2"
-  //    → prebatch_id = "P260311-03-03-001-FV021A-01"
+  //    Format A: "seq,batchId,concatPrebatchId,reCode,weight"
+  //      e.g. "9,P260311-03-03-001,P260311-03-03-001FV021A01,FV021A,2"
+  //    Format B: "planId,prebatchId,,reCode,weight"
+  //      e.g. "P260311-01-01,P260311-01-01-001-CL001A-1,,CL001A,0.24"
   if (rawScan.includes(',')) {
     const parts = rawScan.split(',')
     if (parts.length >= 4) {
-      const batchId = parts[1]?.trim() || ''
-      const concatId = parts[2]?.trim() || ''
-      const reCode = parts[3]?.trim() || ''
-      inferredBatchId = batchId
+      const field0 = parts[0]?.trim() || ''
+      const field1 = parts[1]?.trim() || ''
+      const field3 = parts[3]?.trim() || ''
+      scannedReCode = field3 // re_code is always parts[3]
 
-      // Reconstruct prebatch_id with dashes: batchId-reCode-recodeBatchId
-      if (batchId && reCode && concatId) {
-        const rawSuffix = concatId.replace(batchId, '').replace(reCode, '')
-        const suffix = rawSuffix.replace(/^0+/, '') || '0' // Strip leading zeros: "01" → "1"
-        barcode = `${batchId}-${reCode}-${suffix}`
+      // Detect format: if parts[0] is numeric → Format A, else → Format B
+      if (/^\d+$/.test(field0)) {
+        // Format A: seq,batchId,concatId,reCode,weight
+        inferredBatchId = field1  // e.g. "P260311-03-03-001"
       } else {
-        barcode = concatId || batchId
+        // Format B: planId,prebatchId,,reCode,weight
+        // Extract batch_id from the prebatchId by removing the re_code suffix
+        const prebatchId = field1 // e.g. "P260311-01-01-001-CL001A-1"
+        if (scannedReCode && prebatchId.includes(`-${scannedReCode}-`)) {
+          inferredBatchId = prebatchId.split(`-${scannedReCode}-`)[0] // e.g. "P260311-01-01-001"
+        } else {
+          // Fallback: search across plans
+          inferredBatchId = field1
+        }
+        barcode = prebatchId // Use the full prebatchId for item search
       }
     } else if (parts.length > 1) {
       barcode = parts[1]?.trim() || ''
@@ -1056,41 +1066,39 @@ const processBagScan = async (rawScan: string) => {
     return false
   }
 
-  // 4) Try to find the exact bag in the selected batch
+  // 4) Try to find the matching ingredient in the selected batch
   const batchReqs = selectedBatch.value.reqs || []
   const allBags = [...bagsByWarehouse.value.FH, ...bagsByWarehouse.value.SPP]
-
-  const searchForBag = (searchCode: string) => {
-    let b = allBags.find(x => x.batch_record_id === searchCode || x.prebatch_id === searchCode || x.id?.toString() === searchCode || x.intake_id === searchCode)
-    let i = batchReqs.find((r: any) => r.batch_record_id === searchCode || r.prebatch_id === searchCode)
-    return { b, i }
-  }
 
   let bag = null
   let item = null
 
-  let res = searchForBag(barcode)
-  bag = res.b
-  item = res.i
+  // Primary: Match by re_code (most reliable from scan data)
+  if (scannedReCode) {
+    bag = allBags.find(x => x.re_code === scannedReCode)
+    item = batchReqs.find((r: any) => r.re_code === scannedReCode)
+  }
 
-  // Fallback: If not found and had commas, check all parts just in case
+  // Fallback: match by prebatch_id / batch_record_id
+  if (!bag && !item) {
+    bag = allBags.find(x => x.batch_record_id === barcode || x.prebatch_id === barcode || x.id?.toString() === barcode || x.intake_id === barcode)
+    item = batchReqs.find((r: any) => r.batch_record_id === barcode || r.prebatch_id === barcode)
+  }
+
+  // Fallback: try each comma part
   if (!bag && !item && rawScan.includes(',')) {
     const parts = rawScan.split(',').map(p => p.trim())
     for (const p of parts) {
       if (!p) continue
-      let retryRes = searchForBag(p)
-      if (retryRes.b || retryRes.i) {
-        bag = retryRes.b
-        item = retryRes.i
-        barcode = p
-        break
-      }
+      bag = allBags.find(x => x.batch_record_id === p || x.prebatch_id === p || x.re_code === p)
+      item = batchReqs.find((r: any) => r.batch_record_id === p || r.prebatch_id === p || r.re_code === p)
+      if (bag || item) { barcode = p; break }
     }
   }
 
   if (!bag && !item) {
     playSound('wrong')
-    $q.notify({ type: 'negative', icon: 'error', message: t('packingList.bagNotFound'), caption: barcode, position: 'top', timeout: 3000 })
+    $q.notify({ type: 'negative', icon: 'error', message: t('packingList.bagNotFound'), caption: scannedReCode || barcode, position: 'top', timeout: 3000 })
     return false
   }
 
