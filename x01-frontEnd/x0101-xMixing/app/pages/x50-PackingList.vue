@@ -31,7 +31,10 @@ const scanBatchId = ref('')
 const scanFH = ref('')
 const scanSPP = ref('')
 
-// Scan simulation dialog
+// Track bags scanned in the CURRENT session, before "Closing" the box
+const currentBoxScans = ref<any[]>([])
+
+// ── Modals & Dialogs ──
 const showScanDialog = ref(false)
 const scanDialogWh = ref<'FH' | 'SPP'>('FH')
 const scanDialogFilter = ref('')
@@ -247,6 +250,44 @@ const sppWeight = computed(() =>
 )
 const totalWeight = computed(() => fhWeight.value + sppWeight.value)
 
+/** 3-tier packing status for lower card: Wait → Scan → packing_ok */
+const getReqPackingState = (req: any): { icon: string; color: string; label: string; bg: string } => {
+  if (req.status < 2) {
+    // PreBatch not done yet
+    return { icon: 'radio_button_unchecked', color: 'grey-5', label: 'Wait', bg: '' }
+  }
+  // PreBatch done (status === 2). Check packing_status directly on the item.
+  if (req.packing_status === 1) {
+    return { icon: 'check_circle', color: 'green', label: 'packing_ok', bg: 'bg-green-1' }
+  }
+  // PreBatch done but not yet packed → Scan
+  return { icon: 'qr_code_scanner', color: 'orange', label: 'Scan', bg: 'bg-orange-1' }
+}
+const isReqPackingOk = (req: any): boolean => getReqPackingState(req).label === 'packing_ok'
+
+/** Derive batch-level status from its prebatch_items data */
+const getBatchStatus = (batch: any): { icon: string; color: string; label: string } => {
+  // Boxed takes priority
+  if (batch.fh_boxed_at || batch.spp_boxed_at) {
+    return { icon: 'inventory_2', color: 'green', label: 'Boxed' }
+  }
+  const reqs = batch.reqs || []
+  if (reqs.length === 0) {
+    // No items loaded yet — fall back to batch_prepare flag
+    if (batch.batch_prepare) return { icon: 'check_circle', color: 'blue-7', label: 'Prepared' }
+    return { icon: 'pending', color: 'grey-5', label: batch.status || 'Created' }
+  }
+  // Check packing progress
+  const anyPacked = reqs.some((r: any) => r.packing_status === 1)
+  if (anyPacked) return { icon: 'qr_code_scanner', color: 'orange', label: 'Packing' }
+  // Check prebatch progress
+  const allDone = reqs.every((r: any) => r.status === 2)
+  const anyStarted = reqs.some((r: any) => r.status >= 1)
+  if (allDone) return { icon: 'check_circle', color: 'blue-7', label: 'Prepared' }
+  if (anyStarted) return { icon: 'hourglass_top', color: 'orange', label: 'In-Progress' }
+  return { icon: 'pending', color: 'grey-5', label: batch.status || 'Created' }
+}
+
 /** Check if all bags are packed per warehouse — must match requirement count */
 const fhPackedCount = computed(() => bagsByWarehouse.value.FH.filter(b => isPacked(b)).length)
 const sppPackedCount = computed(() => bagsByWarehouse.value.SPP.filter(b => isPacked(b)).length)
@@ -270,6 +311,7 @@ interface IngredientReq {
   re_code: string
   name: string
   wh: string
+  batch_record_id: string
   totalVol: number
   packedVol: number
   totalBags: number
@@ -292,7 +334,7 @@ const ingredientsByDept = computed((): IngredientReq[] => {
     for (const req of reqs) {
       const code = req.re_code || '?'
       if (!map.has(code)) {
-        map.set(code, { re_code: code, name: req.ingredient_name || code, wh: req.wh || '', totalVol: 0, packedVol: 0, totalBags: 0, packedBags: 0, bags: [] })
+        map.set(code, { re_code: code, name: req.ingredient_name || code, wh: req.wh || '', batch_record_id: req.batch_record_id || '', totalVol: 0, packedVol: 0, totalBags: 0, packedBags: 0, bags: [] })
       }
     }
   }
@@ -301,7 +343,7 @@ const ingredientsByDept = computed((): IngredientReq[] => {
   for (const bag of whBags) {
     const code = bag.re_code || '?'
     if (!map.has(code)) {
-      map.set(code, { re_code: code, name: bag.ingredient_name || code, wh: bag.wh || '', totalVol: 0, packedVol: 0, totalBags: 0, packedBags: 0, bags: [] })
+      map.set(code, { re_code: code, name: bag.ingredient_name || code, wh: bag.wh || '', batch_record_id: bag.batch_record_id || '', totalVol: 0, packedVol: 0, totalBags: 0, packedBags: 0, bags: [] })
     }
     const ing = map.get(code)!
     ing.totalVol += bag.net_volume || 0
@@ -462,18 +504,18 @@ const fetchPlans = async () => {
   }
 }
 
-/** Fetch reqs + recs for a batch on-demand (when user expands it) */
+/** Fetch prebatch items for a batch on-demand (when user expands it) */
 const fetchBatchReqs = async (batch: any) => {
   if (batch._reqsLoaded) return // already loaded
   batch._reqsLoading = true
   try {
-    const reqs = await $fetch<any[]>(`${appConfig.apiBaseUrl}/prebatch-reqs/by-batch/${batch.batch_id}`, {
+    const items = await $fetch<any[]>(`${appConfig.apiBaseUrl}/prebatch-items/by-batch/${batch.batch_id}`, {
       headers: getAuthHeader() as Record<string, string>
     })
-    batch.reqs = reqs || []
+    batch.reqs = items || []
     batch._reqsLoaded = true
   } catch (e) {
-    console.error('Error fetching reqs for', batch.batch_id, e)
+    console.error('Error fetching items for', batch.batch_id, e)
   } finally {
     batch._reqsLoading = false
   }
@@ -575,6 +617,7 @@ const onBatchClick = (batch: any, plan: any) => {
   selectedPlan.value = plan
   scanBatchId.value = batch.batch_id
   fetchBatchRecords(batch.batch_id)
+  currentBoxScans.value = [] // Clear current scans when a new batch is selected
 }
 
 const onScanBatchEnter = () => {
@@ -586,6 +629,7 @@ const onScanBatchEnter = () => {
       selectedPlan.value = plan
       fetchBatchRecords(batch.batch_id)
       $q.notify({ type: 'positive', message: `Batch ${batch.batch_id} loaded`, position: 'top' })
+      currentBoxScans.value = [] // Clear current scans when a new batch is loaded
       return
     }
   }
@@ -662,6 +706,13 @@ const markDelivered = async (batch_id: string, wh: 'FH' | 'SPP') => {
   }
 }
 
+const filteredBoxScans = computed(() => {
+  if (filterMiddleWh.value === 'ALL') return currentBoxScans.value
+  if (filterMiddleWh.value === 'FH') return currentBoxScans.value.filter(bag => isFH(bag.wh || ''))
+  if (filterMiddleWh.value === 'SPP') return currentBoxScans.value.filter(bag => isSPP(bag.wh || ''))
+  return currentBoxScans.value.filter(bag => bag.wh === filterMiddleWh.value)
+})
+
 const filteredTransferredBoxes = computed(() => {
   return transferredBoxes.value.filter(b => b.wh === filterMiddleWh.value)
 })
@@ -692,30 +743,84 @@ const groupedTransferredBoxes = computed((): TransferredBatchRow[] => {
 
 const onCloseBox = (wh: 'FH' | 'SPP') => {
   if (!selectedBatch.value) return
+  const scannedBagsForWh = currentBoxScans.value.filter(bag => (wh === 'FH' ? isFH(bag.wh) : isSPP(bag.wh)))
+  if (scannedBagsForWh.length === 0) {
+     $q.notify({ type: 'warning', message: `No bags scanned for ${wh} box yet.`, position: 'top' })
+     return
+  }
   const batchId = selectedBatch.value.batch_id
   $q.dialog({
     title: `Close ${wh} Packing Box`,
-    message: `All ${wh} pre-batch bags are packed. Mark this box as Boxed?`,
+    message: `You have scanned ${scannedBagsForWh.length} bags. Seal this box and print label?`,
     cancel: true,
     persistent: true,
-    ok: { label: 'Confirm Boxed', color: wh === 'FH' ? 'blue' : 'light-blue', icon: 'unarchive' },
+    ok: { label: 'Seal & Print', color: wh === 'FH' ? 'blue' : 'light-blue', icon: 'check_circle' },
   }).onOk(async () => {
     try {
+      // 1. Mark all scanned items as packed individually
+      for (const bag of scannedBagsForWh) {
+        // Update prebatch_recs (legacy) - only if bag has a prebatch rec id
+        if (bag.batch_record_id || bag.prebatch_id) {
+          try {
+            await $fetch(`${appConfig.apiBaseUrl}/prebatch-recs/${bag.id}/packing-status`, {
+              method: 'PATCH',
+              headers: getAuthHeader() as Record<string, string>,
+              body: { packing_status: 1, packed_by: 'operator' },
+            })
+          } catch (e) {
+            // Expected to fail if bag.id is a prebatch_item id, not a rec id
+          }
+        }
+
+        // Update prebatch_items (new unified table)
+        // The bag itself might BE a req item from onItemClick — use its id directly
+        const whMatcher = wh === 'FH' ? isFH : isSPP
+        const matchingItem = selectedBatch.value.reqs?.find((r: any) =>
+          r.re_code === bag.re_code && whMatcher(r.wh || '')
+        ) || (bag.required_volume !== undefined ? bag : null) // bag IS a req
+        
+        if (matchingItem) {
+          try {
+            await $fetch(`${appConfig.apiBaseUrl}/prebatch-items/${matchingItem.id}/packing-status`, {
+              method: 'PATCH',
+              headers: getAuthHeader() as Record<string, string>,
+              body: { packing_status: 1, packed_by: 'operator' },
+            })
+            matchingItem.packing_status = 1
+          } catch (e) {
+            console.error(`Failed to update packing status for item ${matchingItem.id}:`, e)
+          }
+        }
+      }
+
+      // 2. Close the box on the batch
+      console.log(`[CloseBox] Closing ${wh} box for batch ${batchId}...`)
       await $fetch(`${appConfig.apiBaseUrl}/production-batches/by-batch-id/${batchId}/box-close`, {
         method: 'PATCH',
         headers: getAuthHeader() as Record<string, string>,
         body: { wh },
       })
+      console.log(`[CloseBox] ✅ ${wh} box closed successfully`)
       playSound('correct')
       $q.notify({
         type: 'positive',
-        icon: 'unarchive',
-        message: `✅ ${wh} Packing Box closed — Ready to Delivery`,
+        icon: 'local_shipping',
+        message: `✅ ${wh} Box Closed & Ready for Delivery!`,
         position: 'top',
         timeout: 3000,
       })
-      // Refresh the delivery list from DB
+      
+      // Auto-trigger the print box label function (must await before clearing scans)
+      await printBoxLabel(wh)
+      
+      // Clear current box session for this WH (after print is done reading the data)
+      currentBoxScans.value = currentBoxScans.value.filter(bag => (wh === 'FH' ? !isFH(bag.wh) : !isSPP(bag.wh)))
+      
+      // Refresh data
+      await fetchBatchRecords(batchId)
+      await fetchAllRecords() // Refresh middle panel
       await fetchReadyToDeliver()
+      console.log(`[CloseBox] Data refreshed. Transferred boxes:`, transferredBoxes.value.length)
     } catch (e) {
       console.error('Error closing box:', e)
       $q.notify({ type: 'negative', message: `Failed to close ${wh} box for ${batchId}` })
@@ -734,6 +839,8 @@ const { printPackingBoxReport, printTransferReport, printBoxLabel, printBagLabel
   transferredBoxes,
   selectedForTransfer,
   showTransferDialog,
+  currentBoxScans,
+  filteredBoxScans,
 })
 
 
@@ -745,10 +852,85 @@ const openScanSimulator = (wh: 'FH' | 'SPP') => {
   showScanDialog.value = true
 }
 
+const onItemClick = (req: any) => {
+  if (!selectedBatch.value) return
+  // Fuzzy WH matching: check if item's WH matches the selected filter
+  const reqWh = req.wh || ''
+  const whMatches = filterMiddleWh.value === 'ALL' ||
+    (filterMiddleWh.value === 'FH' && isFH(reqWh)) ||
+    (filterMiddleWh.value === 'SPP' && isSPP(reqWh))
+  if (!whMatches) {
+    playSound('wrong')
+    $q.notify({ type: 'warning', message: `Cannot pack ${req.wh} item while viewing ${filterMiddleWh.value}`, position: 'top', timeout: 2000 })
+    return
+  }
+  if (req.packing_status === 1 || currentBoxScans.value.some(b => b.id === req.id || b.req_id === req.id)) {
+    playSound('wrong')
+    $q.notify({ type: 'info', message: 'Already packed or in box', position: 'top', timeout: 1000 })
+    return
+  }
+  
+  playSound('correct')
+  currentBoxScans.value.push(req)
+  $q.notify({
+    type: 'positive',
+    icon: 'check_circle',
+    message: `✅ ${req.re_code} added to ${req.wh} box`,
+    position: 'top',
+    timeout: 1000,
+  })
+}
+
+/** Click an ingredient requirement row to simulate scanning it into the Current Box */
+const onIngredientScanClick = (ing: IngredientReq) => {
+  if (!selectedBatch.value) {
+    playSound('wrong')
+    $q.notify({ type: 'negative', message: 'Please select a Packing Box first!', icon: 'warning', position: 'top' })
+    return
+  }
+  const reqs = selectedBatch.value.reqs || []
+  // Helper: match warehouse using fuzzy isFH/isSPP
+  const whMatcher = isFH(ing.wh) ? isFH : (isSPP(ing.wh) ? isSPP : (w: string) => w === ing.wh)
+  
+  // 1. Try to find an unpacked req matching re_code + wh
+  let req = reqs.find((r: any) =>
+    r.re_code === ing.re_code && whMatcher(r.wh || '') && r.packing_status !== 1
+    && !currentBoxScans.value.some(b => b.id === r.id)
+  )
+  // 2. Fallback: match by re_code only (unpacked)
+  if (!req) {
+    req = reqs.find((r: any) =>
+      r.re_code === ing.re_code && r.packing_status !== 1
+      && !currentBoxScans.value.some(b => b.id === r.id)
+    )
+  }
+  // 3. Final fallback: any matching req (even packed — onItemClick will show message)
+  if (!req) {
+    req = reqs.find((r: any) => r.re_code === ing.re_code && whMatcher(r.wh || ''))
+    || reqs.find((r: any) => r.re_code === ing.re_code)
+  }
+  if (!req) {
+    playSound('wrong')
+    $q.notify({ type: 'warning', message: `No matching requirement found for ${ing.re_code}`, position: 'top', timeout: 2000 })
+    return
+  }
+  onItemClick(req)
+}
+
 const onSimScanClick = async (bag: any) => {
   if (!selectedBatch.value) {
     playSound('wrong')
     $q.notify({ type: 'negative', message: 'Please select a Packing Box first!', icon: 'warning', position: 'top' })
+    return
+  }
+
+  const bagWh = bag.wh || ''
+  const whOk = filterMiddleWh.value === 'ALL' ||
+    (filterMiddleWh.value === 'FH' && isFH(bagWh)) ||
+    (filterMiddleWh.value === 'SPP' && isSPP(bagWh))
+  if (!whOk) {
+    playSound('wrong')
+    $q.notify({ type: 'warning', message: `Cannot pack ${bag.wh} item while viewing ${filterMiddleWh.value}`, caption: bag.re_code, position: 'top', timeout: 2000 })
     return
   }
 
@@ -761,34 +943,18 @@ const onSimScanClick = async (bag: any) => {
     // Correct — this bag belongs to the selected packing box
     playSound('correct')
 
-    // Persist packing_status=1 to backend
-    try {
-      await $fetch(`${appConfig.apiBaseUrl}/prebatch-recs/${bag.id}/packing-status`, {
-        method: 'PATCH',
-        headers: getAuthHeader() as Record<string, string>,
-        body: { packing_status: 1, packed_by: 'operator' },
-      })
-    } catch (e) {
-      console.error('Failed to update packing status:', e)
+    // Add to currentBoxScans if not already there
+    if (!currentBoxScans.value.some(b => b.id === bag.id)) {
+      currentBoxScans.value.push(bag)
     }
-
-    // Update ALL local data sources that may reference this bag
-    const markPacked = (list: any[]) => {
-      const found = list.find((b: any) => b.id === bag.id)
-      if (found) found.packing_status = 1
-    }
-    markPacked(fhRecords.value)       // Middle panel FH
-    markPacked(sppRecords.value)      // Middle panel SPP
-    markPacked(batchRecords.value)    // Right panel (packing box list)
-    bag.packing_status = 1            // Current scan dialog item
-
+    
     const whLabel = scanDialogWh.value
     if (whLabel === 'FH') scanFH.value = bag.batch_record_id
     else scanSPP.value = bag.batch_record_id
     $q.notify({
       type: 'positive',
       icon: 'check_circle',
-      message: `✅ Correct! ${bag.re_code} packed into box`,
+      message: `✅ Correct! ${bag.re_code} added to current box`,
       caption: bag.batch_record_id,
       position: 'top',
       timeout: 2000,
@@ -819,7 +985,7 @@ const onScanInputEnter = async (wh: 'FH' | 'SPP') => {
     return
   }
 
-  // Find the bag by batch_record_id in batchRecords for this warehouse
+  // 1. Try to find in legacy bags (prebatch_recs via bagsByWarehouse)
   const whBags = wh === 'FH' ? bagsByWarehouse.value.FH : bagsByWarehouse.value.SPP
   const bag = whBags.find(b => 
     b.batch_record_id === scanValue || 
@@ -827,34 +993,70 @@ const onScanInputEnter = async (wh: 'FH' | 'SPP') => {
     b.intake_id === scanValue
   )
 
-  if (!bag) {
-    playSound('wrong')
-    $q.notify({ type: 'negative', icon: 'error', message: t('packingList.bagNotFound'), caption: scanValue, position: 'top', timeout: 3000 })
+  if (bag) {
+    if (isPacked(bag)) {
+      $q.notify({ type: 'info', message: t('packingList.alreadyPacked'), caption: bag.batch_record_id, position: 'top', timeout: 2000 })
+    } else {
+      await onSimScanClick(bag)
+    }
     if (wh === 'FH') scanFH.value = ''
     else scanSPP.value = ''
     return
   }
 
-  if (isPacked(bag)) {
-    $q.notify({ type: 'info', message: t('packingList.alreadyPacked'), caption: bag.batch_record_id, position: 'top', timeout: 2000 })
+  // 2. Fallback: find in prebatch_items (lower card) by batch_record_id
+  const batchReqs = selectedBatch.value.reqs || []
+  const whFilter = wh === 'FH' ? isFH : isSPP
+  const item = batchReqs.find((r: any) =>
+    whFilter(r.wh || '') && r.batch_record_id === scanValue
+  )
+
+  if (item) {
+    if (item.packing_status === 1) {
+      playSound('correct')
+      $q.notify({ type: 'info', message: 'Already packed', caption: item.batch_record_id, position: 'top', timeout: 2000 })
+    } else {
+      playSound('correct')
+      try {
+        await $fetch(`${appConfig.apiBaseUrl}/prebatch-items/${item.id}/packing-status`, {
+          method: 'PATCH',
+          headers: getAuthHeader() as Record<string, string>,
+          body: { packing_status: 1, packed_by: 'operator' },
+        })
+        item.packing_status = 1
+        $q.notify({
+          type: 'positive',
+          icon: 'check_circle',
+          message: `✅ ${item.re_code} packed into box`,
+          caption: item.batch_record_id,
+          position: 'top',
+          timeout: 2000,
+        })
+      } catch (e) {
+        console.error('Failed to update packing status:', e)
+        $q.notify({ type: 'negative', message: 'Failed to update packing status', position: 'top' })
+      }
+    }
     if (wh === 'FH') scanFH.value = ''
     else scanSPP.value = ''
     return
   }
 
-  // Process the scan — same logic as onSimScanClick
-  await onSimScanClick(bag)
+  // 3. Not found anywhere
+  playSound('wrong')
+  $q.notify({ type: 'negative', icon: 'error', message: t('packingList.bagNotFound'), caption: scanValue, position: 'top', timeout: 3000 })
   if (wh === 'FH') scanFH.value = ''
   else scanSPP.value = ''
 }
 
 // Watch for MQTT scans — smart routing: intake ID vs batch ID
-watch(lastScan, (scan) => {
+watch(lastScan, async (scan) => {
   if (!scan?.barcode) return
   const barcode = scan.barcode.trim()
 
   // If a batch is selected, try to match as intake ID first
   if (selectedBatch.value) {
+    // 1. Try legacy bags (prebatch_recs)
     const allBags = [...bagsByWarehouse.value.FH, ...bagsByWarehouse.value.SPP]
     const bag = allBags.find(b =>
       b.batch_record_id === barcode ||
@@ -862,8 +1064,27 @@ watch(lastScan, (scan) => {
       b.intake_id === barcode
     )
     if (bag) {
-      // Route to packing
       onSimScanClick(bag)
+      return
+    }
+
+    // 2. Fallback: try prebatch_items (lower card)
+    const batchReqs = selectedBatch.value.reqs || []
+    const item = batchReqs.find((r: any) => r.batch_record_id === barcode)
+    if (item && item.packing_status !== 1) {
+      playSound('correct')
+      try {
+        await $fetch(`${appConfig.apiBaseUrl}/prebatch-items/${item.id}/packing-status`, {
+          method: 'PATCH',
+          headers: getAuthHeader() as Record<string, string>,
+          body: { packing_status: 1, packed_by: 'operator' },
+        })
+        item.packing_status = 1
+        $q.notify({ type: 'positive', icon: 'check_circle', message: `✅ ${item.re_code} packed`, caption: barcode, position: 'top', timeout: 2000 })
+      } catch (e) { console.error('MQTT scan packing error:', e) }
+      return
+    } else if (item && item.packing_status === 1) {
+      $q.notify({ type: 'info', message: 'Already packed', caption: barcode, position: 'top', timeout: 2000 })
       return
     }
   }
@@ -1005,7 +1226,8 @@ onMounted(async () => {
 
       <!-- ═══ LEFT PANEL: Production Plans + Transferred ═══ -->
       <div class="col-4 column q-gutter-y-sm" style="height:100%;min-height:0;overflow:hidden;">
-        <q-card class="column shadow-2" style="flex:1;min-height:0;overflow:hidden;">
+        <!-- ── Upper Card: Production Plans (1/3 height) ── -->
+        <q-card class="column shadow-2" style="flex:0 0 33.33%;min-height:0;overflow:hidden;">
           <q-card-section class="bg-blue-9 text-white q-py-xs">
             <div class="row items-center justify-between no-wrap">
               <div class="row items-center q-gutter-xs">
@@ -1053,8 +1275,8 @@ onMounted(async () => {
                       <template v-slot:header>
                         <q-item-section avatar style="min-width:20px">
                           <q-icon
-                            :name="batch.batch_prepare ? 'check_circle' : 'pending'"
-                            :color="batch.batch_prepare ? 'blue-7' : 'grey-5'"
+                            :name="getBatchStatus(batch).icon"
+                            :color="getBatchStatus(batch).color"
                             size="xs"
                           />
                         </q-item-section>
@@ -1066,8 +1288,8 @@ onMounted(async () => {
                         </q-item-section>
                         <q-item-section side>
                           <q-badge
-                            :color="batch.batch_prepare ? 'blue-7' : 'grey-5'"
-                            :label="batch.batch_prepare ? 'Prepared' : batch.status"
+                            :color="getBatchStatus(batch).color"
+                            :label="getBatchStatus(batch).label"
                             style="font-size:0.6rem"
                           />
                         </q-item-section>
@@ -1112,57 +1334,54 @@ onMounted(async () => {
                               <q-expansion-item
                                 v-for="req in whGroup.items" :key="req.id"
                                 dense expand-separator
-                                :header-class="req.status === 2 ? 'bg-blue-1' : (req.status === 1 ? 'bg-orange-1' : '')"
+                                :header-class="getReqPackingState(req).bg"
                               >
                                 <template v-slot:header>
                                   <q-item-section avatar style="min-width:18px">
                                     <q-icon
-                                      :name="req.status === 2 ? 'check_circle' : (req.status === 1 ? 'hourglass_top' : 'radio_button_unchecked')"
-                                      :color="req.status === 2 ? 'blue-7' : (req.status === 1 ? 'orange-7' : 'grey-4')"
+                                      :name="getReqPackingState(req).icon"
+                                      :color="getReqPackingState(req).color"
                                       size="xs"
                                     />
                                   </q-item-section>
                                   <q-item-section>
                                     <q-item-label style="font-size:0.7rem" class="text-weight-bold">
-                                      {{ req.re_code }}
+                                      {{ req.ingredient_name || req.re_code }}
                                     </q-item-label>
                                   </q-item-section>
                                   <q-item-section side>
                                     <span class="text-weight-bold" style="font-size:0.68rem">{{ req.required_volume?.toFixed(4) }}</span>
                                   </q-item-section>
-                                  <q-item-section side style="min-width:44px">
+                                  <q-item-section side style="min-width:60px">
                                     <q-badge
-                                      :color="req.status === 2 ? 'blue-7' : (req.status === 1 ? 'orange-7' : 'grey-4')"
-                                      :label="req.status === 2 ? 'Done' : (req.status === 1 ? 'Batch' : 'Wait')"
+                                      :color="getReqPackingState(req).color"
+                                      :label="getReqPackingState(req).label"
                                       style="font-size:0.55rem"
                                     />
                                   </q-item-section>
                                 </template>
 
-                                <!-- PreBatch Package IDs -->
+                                <!-- PreBatch Item Detail -->
                                 <q-list dense class="q-pl-md bg-grey-1">
-                                  <q-item
-                                    v-for="rec in (req.recs || [])" :key="rec.id"
-                                    dense style="min-height:24px;"
-                                  >
+                                  <q-item v-if="req.batch_record_id" dense style="min-height:24px;">
                                     <q-item-section avatar style="min-width:16px">
                                       <q-icon
-                                        :name="rec.packing_status === 1 ? 'check_box' : 'check_box_outline_blank'"
-                                        :color="rec.packing_status === 1 ? 'blue-6' : 'grey-4'"
+                                        :name="req.packing_status === 1 ? 'check_box' : 'check_box_outline_blank'"
+                                        :color="req.packing_status === 1 ? 'green' : 'grey-4'"
                                         size="xs"
                                       />
                                     </q-item-section>
                                     <q-item-section>
                                       <q-item-label style="font-size:0.62rem;font-family:monospace;">
-                                        {{ rec.batch_record_id }}
+                                        {{ req.batch_record_id }}
                                       </q-item-label>
                                     </q-item-section>
                                     <q-item-section side>
-                                      <span style="font-size:0.62rem;font-weight:bold;">{{ rec.net_volume?.toFixed(4) }} kg</span>
+                                      <span style="font-size:0.62rem;font-weight:bold;">{{ req.total_packaged?.toFixed(4) }} kg</span>
                                     </q-item-section>
                                   </q-item>
-                                  <q-item v-if="!req.recs || req.recs.length === 0" dense style="min-height:22px">
-                                    <q-item-section class="text-grey-5 text-italic" style="font-size:0.6rem">No packages yet</q-item-section>
+                                  <q-item v-else dense style="min-height:22px">
+                                    <q-item-section class="text-grey-5 text-italic" style="font-size:0.6rem">Not weighed yet</q-item-section>
                                   </q-item>
                                 </q-list>
                               </q-expansion-item>
@@ -1190,80 +1409,219 @@ onMounted(async () => {
             </q-scroll-area>
           </div>
         </q-card>
+
+        <!-- ── Lower Card: PreBatch Packing (2/3 height) ── -->
+        <q-card class="column shadow-2" style="flex:1;min-height:0;overflow:hidden;">
+          <q-card-section class="bg-blue-7 text-white q-py-xs">
+            <div class="row items-center justify-between no-wrap">
+              <div class="row items-center q-gutter-xs">
+                <q-icon name="inventory_2" size="sm" />
+                <div class="text-subtitle2 text-weight-bold">PreBatch Packing</div>
+              </div>
+              <q-badge v-if="selectedBatch" color="white" text-color="blue-7" class="text-weight-bold">
+                {{ (selectedBatch.reqs || []).filter((r: any) => isReqPackingOk(r)).length }}/{{ (selectedBatch.reqs || []).length }}
+              </q-badge>
+            </div>
+          </q-card-section>
+          <div class="col relative-position">
+            <q-scroll-area class="fit">
+              <!-- No batch selected -->
+              <div v-if="!selectedBatch" class="text-center q-pa-lg text-grey">
+                <q-icon name="inventory_2" size="xl" class="q-mb-sm" /><br>
+                <span class="text-caption">Select a batch to view packing items</span>
+              </div>
+
+              <template v-else>
+                <!-- FH Section -->
+                <q-expansion-item
+                  v-if="(selectedBatch.reqs || []).filter((r: any) => isFH(r.wh || '')).length > 0"
+                  dense expand-separator default-opened
+                  header-class="bg-blue-1"
+                >
+                  <template v-slot:header>
+                    <q-item-section avatar style="min-width:24px">
+                      <q-badge color="blue-6" label="FH" style="font-size:0.6rem" />
+                    </q-item-section>
+                    <q-item-section>
+                      <q-item-label class="text-weight-bold" style="font-size:0.78rem">FH — Flavour House</q-item-label>
+                    </q-item-section>
+                    <q-item-section side>
+                      <q-badge color="blue-7" class="text-weight-bold" style="font-size:0.65rem">
+                        {{ (selectedBatch.reqs || []).filter((r: any) => isFH(r.wh || '') && isReqPackingOk(r)).length }}/{{ (selectedBatch.reqs || []).filter((r: any) => isFH(r.wh || '')).length }}
+                      </q-badge>
+                    </q-item-section>
+                  </template>
+                  <q-list dense separator class="bg-white">
+                    <q-item
+                      v-for="req in (selectedBatch.reqs || []).filter((r: any) => isFH(r.wh || ''))" :key="req.id"
+                      dense style="min-height:28px"
+                      class="cursor-pointer"
+                      :class="getReqPackingState(req).bg"
+                      @click="onItemClick(req)"
+                    >
+                      <q-item-section avatar style="min-width:20px">
+                        <q-icon
+                          :name="getReqPackingState(req).icon"
+                          :color="getReqPackingState(req).color"
+                          size="xs"
+                        />
+                      </q-item-section>
+                      <q-item-section>
+                        <q-item-label style="font-size:0.7rem" class="text-weight-bold">
+                          {{ req.re_code }}
+                        </q-item-label>
+                        <q-item-label caption style="font-size:0.6rem">{{ req.required_volume?.toFixed(4) }} kg</q-item-label>
+                      </q-item-section>
+                      <q-item-section side style="min-width:60px">
+                        <q-badge
+                          :color="getReqPackingState(req).color"
+                          :label="getReqPackingState(req).label"
+                          style="font-size:0.55rem"
+                        />
+                      </q-item-section>
+                    </q-item>
+                  </q-list>
+                </q-expansion-item>
+
+                <!-- SPP Section -->
+                <q-expansion-item
+                  v-if="(selectedBatch.reqs || []).filter((r: any) => isSPP(r.wh || '')).length > 0"
+                  dense expand-separator default-opened
+                  header-class="bg-light-blue-1"
+                >
+                  <template v-slot:header>
+                    <q-item-section avatar style="min-width:24px">
+                      <q-badge color="light-blue-6" label="SPP" style="font-size:0.6rem" />
+                    </q-item-section>
+                    <q-item-section>
+                      <q-item-label class="text-weight-bold" style="font-size:0.78rem">SPP — Spray Powder Plant</q-item-label>
+                    </q-item-section>
+                    <q-item-section side>
+                      <q-badge color="light-blue-7" class="text-weight-bold" style="font-size:0.65rem">
+                        {{ (selectedBatch.reqs || []).filter((r: any) => isSPP(r.wh || '') && isReqPackingOk(r)).length }}/{{ (selectedBatch.reqs || []).filter((r: any) => isSPP(r.wh || '')).length }}
+                      </q-badge>
+                    </q-item-section>
+                  </template>
+                  <q-list dense separator class="bg-white">
+                    <q-item
+                      v-for="req in (selectedBatch.reqs || []).filter((r: any) => isSPP(r.wh || ''))" :key="req.id"
+                      dense style="min-height:28px"
+                      class="cursor-pointer"
+                      :class="getReqPackingState(req).bg"
+                      @click="onItemClick(req)"
+                    >
+                      <q-item-section avatar style="min-width:20px">
+                        <q-icon
+                          :name="getReqPackingState(req).icon"
+                          :color="getReqPackingState(req).color"
+                          size="xs"
+                        />
+                      </q-item-section>
+                      <q-item-section>
+                        <q-item-label style="font-size:0.7rem" class="text-weight-bold">
+                          {{ req.re_code }}
+                        </q-item-label>
+                        <q-item-label caption style="font-size:0.6rem">{{ req.required_volume?.toFixed(4) }} kg</q-item-label>
+                      </q-item-section>
+                      <q-item-section side style="min-width:60px">
+                        <q-badge
+                          :color="getReqPackingState(req).color"
+                          :label="getReqPackingState(req).label"
+                          style="font-size:0.55rem"
+                        />
+                      </q-item-section>
+                    </q-item>
+                  </q-list>
+                </q-expansion-item>
+
+                <!-- No items -->
+                <div v-if="!selectedBatch.reqs || selectedBatch.reqs.length === 0" class="text-center q-pa-md text-grey">
+                  <q-icon name="inbox" size="md" class="q-mb-xs" /><br>
+                  <span class="text-caption">No prebatch items for this batch</span>
+                </div>
+              </template>
+            </q-scroll-area>
+          </div>
+        </q-card>
       </div>
 
 
       <!-- ═══ PANEL 2+3: Packing Box + Pre-Batch Packages ═══ -->
       <div class="col-4 column q-gutter-y-sm" style="order:2;height:100%;min-height:0;overflow:hidden;">
-        <q-card class="column shadow-2" style="flex:0 0 30%;min-height:0;overflow:hidden;">
+        <q-card class="column shadow-2" style="flex:0 0 auto;min-height:0;overflow:hidden;">
           <q-card-section class="bg-indigo-9 text-white q-py-xs">
             <div class="row items-center justify-between no-wrap">
               <div class="row items-center q-gutter-xs">
                 <q-icon name="qr_code_scanner" size="sm" />
-                <div class="text-subtitle2 text-weight-bold">{{ t('packingList.packingBox') }}</div>
+                <div class="text-subtitle2 text-weight-bold">{{ filterMiddleWh === 'FH' ? 'Current FH Box' : (filterMiddleWh === 'SPP' ? 'Current SPP Box' : 'Current Box') }}</div>
               </div>
               <div class="row items-center q-gutter-sm">
-                <!-- Print Button: active only when all bags for current WH are Boxed -->
+                <q-badge color="white" text-color="indigo-9" class="text-weight-bold">
+                  {{ filteredBoxScans.length }} items
+                </q-badge>
                 <q-btn
-                  flat round dense icon="print" size="sm"
-                  :color="(filterMiddleWh === 'FH' ? allFhPacked : allSppPacked) ? 'white' : 'indigo-3'"
-                  :disable="!(filterMiddleWh === 'FH' ? allFhPacked : allSppPacked)"
-                  @click="printBoxLabel(filterMiddleWh === 'ALL' ? 'FH' : filterMiddleWh)"
+                  unelevated size="sm" icon="check_box" label="Close Box & Print"
+                  :color="filteredBoxScans.length > 0 ? 'green-5' : 'grey-5'"
+                  :disable="filteredBoxScans.length === 0"
+                  @click="onCloseBox(filterMiddleWh === 'ALL' ? 'FH' : filterMiddleWh)"
                 >
-                  <q-tooltip>{{ (filterMiddleWh === 'FH' ? allFhPacked : allSppPacked) ? 'Print Box Packing Label' : 'Pack all bags first' }}</q-tooltip>
+                  <q-tooltip>{{ filteredBoxScans.length > 0 ? 'Seal Box & Print Label' : 'Scan items first' }}</q-tooltip>
                 </q-btn>
               </div>
             </div>
           </q-card-section>
-          <q-card-section class="q-py-sm">
+          
+          <!-- Compact Batch Scanner + Info -->
+          <q-card-section class="q-py-xs q-px-sm">
             <q-input
               v-model="scanBatchId" outlined dense
               :placeholder="t('packingList.scanBoxLabel')"
               bg-color="grey-1"
               @keyup.enter="onScanBatchEnter"
+              style="font-size:0.8rem"
             >
               <template v-slot:prepend>
-                <q-icon name="qr_code_scanner" color="indigo" />
+                <q-icon name="qr_code_scanner" color="indigo" size="xs" />
               </template>
               <template v-slot:append>
-                <q-btn flat round dense icon="search" color="indigo" @click="onScanBatchEnter" />
+                <q-btn flat round dense icon="search" color="indigo" size="xs" @click="onScanBatchEnter" />
               </template>
             </q-input>
-
-            <template v-if="batchInfo">
-              <div class="q-mt-sm">
-                <div class="row q-col-gutter-xs text-caption">
-                  <div class="col-6">
-                    <div class="text-grey-6">{{ t('packingList.skuName') }}</div>
-                    <div class="text-weight-bold text-body2">{{ batchInfo.sku_name }}</div>
-                  </div>
-                  <div class="col-6">
-                    <div class="text-grey-6">{{ t('packingList.planId') }}</div>
-                    <div class="text-weight-bold text-body2">{{ batchInfo.plan_id }}</div>
-                  </div>
-                  <div class="col-6 q-mt-xs">
-                    <div class="text-grey-6">{{ t('packingList.batchSize') }}</div>
-                    <div class="text-weight-bold text-body2">{{ batchInfo.batch_size }} kg</div>
-                  </div>
-                  <div class="col-6 q-mt-xs">
-                    <div class="text-grey-6">{{ t('packingList.status') }}</div>
-                    <q-badge
-                      :color="batchInfo.status === 'Prepared' ? 'blue' : (batchInfo.status === 'Created' ? 'grey' : 'light-blue')"
-                      :label="batchInfo.status"
-                    />
-                  </div>
-                </div>
-              </div>
-            </template>
-            <div v-else class="text-center text-grey q-pa-sm">
-              <q-icon name="qr_code_2" size="md" class="q-mb-xs" /><br>
-              <span class="text-caption">{{ t('packingList.scanOrSelect') }}</span>
+            <div v-if="batchInfo" class="row items-center q-gutter-x-sm q-mt-xs" style="font-size:0.7rem">
+              <span class="text-weight-bold">{{ batchInfo.sku_name }}</span>
+              <span class="text-grey-6">|</span>
+              <span>{{ batchInfo.plan_id }}</span>
+              <span class="text-grey-6">|</span>
+              <span>{{ batchInfo.batch_size }} kg</span>
+              <q-badge
+                :color="batchInfo.status === 'Prepared' ? 'blue' : (batchInfo.status === 'Created' ? 'grey' : 'light-blue')"
+                :label="batchInfo.status"
+                style="font-size:0.55rem"
+              />
             </div>
-
           </q-card-section>
+
+          <!-- Current Box Items (compact, scrollable) -->
+          <div v-if="filteredBoxScans.length > 0" style="max-height:300px; overflow-y:auto; background:#f5f7fa;">
+            <q-list dense separator class="bg-white" style="border-radius:0;">
+              <q-item v-for="(bag, idx) in filteredBoxScans" :key="idx" dense style="min-height:24px">
+                <q-item-section avatar style="min-width:20px">
+                   <q-icon name="check_circle" size="xs" color="green-6" />
+                </q-item-section>
+                <q-item-section>
+                   <q-item-label style="font-size:0.7rem" class="text-weight-bold">{{ bag.re_code }}</q-item-label>
+                </q-item-section>
+                <q-item-section side>
+                   <span style="font-size:0.65rem" class="text-weight-bold text-green-8">
+                     {{ bag.net_volume?.toFixed(3) || bag.total_request_volume?.toFixed(3) || bag.required_volume?.toFixed(3) }} kg
+                   </span>
+                </q-item-section>
+              </q-item>
+            </q-list>
+          </div>
         </q-card>
 
-        <!-- Pre-Batch Packages -->
+        <!-- Required Ingredients Card (fills remaining space) -->
         <q-card class="col column shadow-2" style="flex:1;min-height:0;overflow:hidden;">
           <q-card-section :class="filterMiddleWh === 'FH' ? 'bg-blue-8 text-white' : 'bg-light-blue-8 text-white'" class="q-py-xs">
             <div class="row items-center justify-between no-wrap">
@@ -1278,13 +1636,6 @@ onMounted(async () => {
                 <q-badge color="white" :text-color="filterMiddleWh === 'FH' ? 'blue-9' : 'light-blue-9'" class="text-weight-bold">
                   {{ ingredientsByDept.reduce((s, i) => s + i.packedBags, 0) }}/{{ ingredientsByDept.reduce((s, i) => s + i.totalBags, 0) }}
                 </q-badge>
-                <q-btn
-                  dense flat size="xs" icon="unarchive" label="Boxed"
-                  :color="(filterMiddleWh === 'FH' ? allFhPacked : allSppPacked) ? 'white' : 'blue-3'"
-                  :disable="!(filterMiddleWh === 'FH' ? allFhPacked : allSppPacked)"
-                  @click="onCloseBox(filterMiddleWh === 'ALL' ? 'FH' : filterMiddleWh)"
-                  class="text-weight-bold"
-                />
               </div>
             </div>
           </q-card-section>
@@ -1348,7 +1699,11 @@ onMounted(async () => {
                           :name="(ing.packedBags === ing.totalBags && ing.totalBags > 0) ? 'check_circle' : (ing.totalBags > 0 ? 'hourglass_top' : 'radio_button_unchecked')"
                           :color="(ing.packedBags === ing.totalBags && ing.totalBags > 0) ? 'blue-7' : (ing.totalBags > 0 ? 'orange-7' : 'grey-4')"
                           size="sm"
-                        />
+                          class="cursor-pointer"
+                          @click.stop="onIngredientScanClick(ing)"
+                        >
+                          <q-tooltip>Click to scan into Current Box</q-tooltip>
+                        </q-icon>
                       </q-item-section>
                       <q-item-section>
                         <q-item-label class="text-weight-bold" style="font-size:0.8rem">
@@ -1362,6 +1717,8 @@ onMounted(async () => {
                           />
                         </q-item-label>
                         <q-item-label caption style="font-size:0.65rem">
+                          <span v-if="ing.batch_record_id" class="text-mono text-grey-7">{{ ing.batch_record_id }}</span>
+                          <span v-if="ing.batch_record_id"> · </span>
                           {{ ing.totalVol.toFixed(3) }} kg
                         </q-item-label>
                       </q-item-section>
@@ -1374,6 +1731,11 @@ onMounted(async () => {
                           {{ ing.packedBags }}/{{ ing.totalBags }} bags
                         </q-badge>
                       </q-item-section>
+                      <q-item-section side style="min-width:32px">
+                        <q-btn flat round dense icon="add_circle" size="sm" color="green-7" @click.stop="onIngredientScanClick(ing)">
+                          <q-tooltip>Click to add to Current Box (Scan)</q-tooltip>
+                        </q-btn>
+                      </q-item-section>
                     </template>
 
                     <!-- Expandable: individual bags -->
@@ -1382,21 +1744,27 @@ onMounted(async () => {
                         v-for="bag in ing.bags" :key="bag.id"
                         dense clickable style="min-height:30px;cursor:pointer"
                         :class="getBagRowClass(bag)"
-                        @click="printBagLabel(bag)"
+                        @click="onSimScanClick(bag)"
                       >
                         <q-item-section avatar style="min-width:20px">
                           <q-icon :name="getBagStatusIcon(bag)" :color="getBagStatusColor(bag)" size="xs" />
                         </q-item-section>
                         <q-item-section>
-                          <q-item-label style="font-size:0.7rem" class="text-mono">
-                            {{ bag.batch_record_id }}
+                          <q-item-label style="font-size:0.7rem; font-weight:600;" class="text-mono">
+                            {{ bag.prebatch_id || bag.batch_record_id }}
+                          </q-item-label>
+                          <q-item-label caption style="font-size:0.6rem; margin-top:0;">
+                            ID: {{ bag.batch_record_id }}
                           </q-item-label>
                         </q-item-section>
                         <q-item-section side>
                           <span class="text-weight-bold" style="font-size:0.7rem">{{ bag.net_volume?.toFixed(3) }} kg</span>
                         </q-item-section>
-                        <q-item-section side style="min-width:52px">
-                          <q-badge :color="getBagStatusColor(bag)" :label="getBagStatusLabel(bag)" style="font-size:0.6rem" />
+                        <q-item-section side style="min-width:70px" class="row items-center no-wrap">
+                          <q-badge :color="getBagStatusColor(bag)" :label="getBagStatusLabel(bag)" style="font-size:0.6rem" class="q-mr-xs" />
+                          <q-btn flat round dense icon="print" size="xs" color="grey-7" @click.stop="printBagLabel(bag)">
+                            <q-tooltip>Re-Print Packing Bag Label</q-tooltip>
+                          </q-btn>
                         </q-item-section>
                       </q-item>
                     </q-list>
@@ -1413,6 +1781,7 @@ onMounted(async () => {
             </q-scroll-area>
           </div>
         </q-card>
+
 
       </div>
       <!-- ═══ 4TH PANEL: Ready to Delivery ═══ -->
@@ -1478,8 +1847,8 @@ onMounted(async () => {
                     class="q-pa-xs"
                   >
                     <q-item-section>
-                      <q-item-label class="text-weight-bold text-caption">
-                        {{ row.batch_id?.split('-').slice(0, -1).join('-') }} — <span class="text-indigo-8">{{ row.batch_id?.split('-').slice(-1)[0] }}</span>
+                      <q-item-label class="text-weight-bold text-caption text-mono">
+                        📦 {{ row.batch_id }}-{{ filterMiddleWh === 'FH' ? 'FH' : 'SPP' }}
                       </q-item-label>
                     </q-item-section>
 

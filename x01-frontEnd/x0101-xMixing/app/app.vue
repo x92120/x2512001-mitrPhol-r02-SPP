@@ -131,6 +131,11 @@ const handleLogout = async () => {
           :label="t('nav.batchRecheck')"
           v-if="hasPermission('production_list')"
         />
+        <q-route-tab 
+          to="/x70-Report" 
+          icon="print" 
+          label="Report" 
+        />
         <q-route-tab to="/x89-UserConfig" icon="manage_accounts" :label="t('nav.user')" v-if="hasPermission('admin')" />
         <q-route-tab to="/x90-systemDashboard" icon="dashboard" :label="t('nav.systemDashboard')" v-if="hasPermission('admin')" />
         <q-route-tab to="/x91-ServerStation" icon="dns" label="Server Station" v-if="hasPermission('admin')" />

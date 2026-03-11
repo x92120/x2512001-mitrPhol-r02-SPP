@@ -1098,7 +1098,7 @@ const reopenScanDialogAfterPrint = () => {
                                 <td class="text-center">
                                     <q-badge v-if="ing.status === 2" color="green" :label="t('preBatch.complete')" size="sm" />
                                     <q-badge v-else-if="ing.status === 1" color="orange" :label="t('preBatch.onBatch')" size="sm" />
-                                    <q-badge v-else color="grey-6" label="Created" size="sm" />
+                                    <q-badge v-else color="grey-6" label="Wait" size="sm" />
                                 </td>
                                 <td class="text-center">
                                     <q-btn v-if="ing.status >= 1" flat round dense icon="print" size="xs" color="blue-9" @click.stop="printAllPlanLabels(ing)">
@@ -1139,8 +1139,8 @@ const reopenScanDialogAfterPrint = () => {
                                                         <td class="text-right">{{ bd.required_volume.toFixed(5) }}</td>
                                                         <td class="text-right" :class="bd.actual_volume > 0 ? 'text-blue-9 text-weight-bold' : ''">{{ bd.actual_volume.toFixed(5) }}</td>
                                                         <td class="text-center">
-                                                            <q-badge v-if="bd.status === 2" color="green" label="Done" size="sm" />
-                                                            <q-badge v-else-if="bd.status === 1" color="orange" label="Batch" size="sm" />
+                                                            <q-badge v-if="bd.status === 2" color="green" label="preBatch_ok" size="sm" />
+                                                            <q-badge v-else-if="bd.status === 1" color="orange" label="Prepare" size="sm" />
                                                             <q-badge v-else color="grey-5" label="Wait" size="sm" />
                                                         </td>
                                                         <td class="text-center">
@@ -1940,7 +1940,7 @@ const reopenScanDialogAfterPrint = () => {
                             <q-item-section side>
                                 <q-badge
                                     :color="item.status === 2 ? 'green' : (item.status === 1 ? 'orange' : 'grey-5')"
-                                    :label="item.status === 2 ? 'Done' : (item.status === 1 ? 'Batch' : 'Wait')"
+                                    :label="item.status === 2 ? 'preBatch_ok' : (item.status === 1 ? 'Prepare' : 'Wait')"
                                     size="sm"
                                 />
                             </q-item-section>

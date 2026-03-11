@@ -367,7 +367,7 @@ class PreBatchItem(Base):
     ingredient_name = Column(String(200))
     required_volume = Column(Float)
     wh = Column(String(50), default="Mix")
-    status = Column(Integer, default=0)  # 0=Wait, 1=Batch, 2=Done
+    status = Column(Integer, default=0)  # 0=Wait, 1=Prepare, 2=preBatch_ok
     # Packing fields (filled when operator weighs — NULL until then)
     batch_record_id = Column(String(100), index=True)
     net_volume = Column(Float)

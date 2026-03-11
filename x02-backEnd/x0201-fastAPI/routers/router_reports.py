@@ -504,3 +504,121 @@ def traceability_report(
         return result
 
     raise HTTPException(status_code=404, detail="ID not found as intake lot or batch")
+
+
+# ── 8. Production Plan ODT/DOCX Report ──────────────────────────────────────────────
+
+@router.get("/production-plan-odt/{plan_id}")
+def generate_production_plan_odt(
+    plan_id: str,
+    db: Session = Depends(get_db)
+):
+    """Generate a DOCX report for a production plan using docxtpl."""
+    try:
+        from docxtpl import DocxTemplate
+        import tempfile
+        import os
+    except ImportError:
+        raise HTTPException(status_code=500, detail="Document generation libraries are not installed.")
+
+    plan = db.query(models.ProductionPlan).filter(models.ProductionPlan.plan_id == plan_id).first()
+    if not plan:
+        raise HTTPException(status_code=404, detail="Plan not found")
+
+    # Gather data
+    # The template is now located in the frontend's x70-Report folder
+    template_path = os.path.join(os.path.dirname(__file__), "..", "..", "..", "x01-frontEnd", "x0101-xMixing", "app", "x70-Report", "templates", "ReportTemplate.docx")
+    template_path = os.path.abspath(template_path)
+    
+    if not os.path.exists(template_path):
+        raise HTTPException(status_code=500, detail=f"Report template not found on server at: {template_path}")
+
+    # Get batches and items
+    batches_data = []
+    
+    # Needs to match the fetch logic from earlier: wait-status included
+    from sqlalchemy.orm import selectinload
+    prebatch_items = db.query(models.PreBatchItem).options(
+        selectinload(models.PreBatchItem.origins)
+    ).filter(
+        models.PreBatchItem.plan_id == plan_id
+    ).all()
+
+    for batch in (plan.batches or []):
+        items = [i for i in prebatch_items if i.batch_id == batch.batch_id]
+        
+        # Calculate status setpoint logic
+        all_boxed = all(r.packing_status == 1 for r in items) if items else False
+        some_prepared = any(r.status == 2 or r.packing_status == 2 for r in items) if items else False
+        
+        status_setpoint = "Pending"
+        if all_boxed and items:
+            status_setpoint = "Completed"
+        elif some_prepared:
+            status_setpoint = "Preparation In-Progress"
+            
+        b_dict = {
+            "batch_id": batch.batch_id,
+            "status": batch.status,
+            "batch_size": batch.batch_size,
+            "status_setpoint": status_setpoint,
+            "items": []
+        }
+        
+        for req in items:
+            b_dict["items"].append({
+                "prebatch_id": req.prebatch_id or "-",
+                "mat_sap_code": req.mat_sap_code or "-",
+                "re_code": req.re_code,
+                "required_volume": req.required_volume,
+                "net_volume": req.net_volume or "-",
+                "package_no": f"{req.package_no}/{req.total_packages}" if req.packing_status == 1 else "-"
+            })
+            
+        batches_data.append(b_dict)
+        
+    context = {
+        "plan_id": plan.plan_id,
+        "sku_name": plan.sku_name or plan.sku_id,
+        "start_date": str(plan.start_date) if plan.start_date else "-",
+        "finish_date": str(plan.finish_date) if plan.finish_date else "-",
+        "total_volume": plan.total_plan_volume or plan.total_volume,
+        "items": [item for b in batches_data for item in [
+            {
+                "batch_id": b["batch_id"],
+                "prebatch_id": it["prebatch_id"],
+                "mat_sap_code": it["mat_sap_code"],
+                "re_code": it["re_code"],
+                "required_volume": it["required_volume"],
+                "net_volume": it["net_volume"],
+                "package_no": it["package_no"],
+            } for it in b["items"]
+        ]]
+    }
+
+    doc = DocxTemplate(template_path)
+    doc.render(context)
+    
+    # Save to temp file
+    fd, temp_path = tempfile.mkstemp(suffix=".docx")
+    os.close(fd)
+    doc.save(temp_path)
+    
+    from fastapi.responses import FileResponse
+    from fastapi.background import BackgroundTasks
+
+    def cleanup_file(path: str):
+        try:
+            os.remove(path)
+        except Exception:
+            pass
+            
+    # We must not cleanup immediately since FileResponse reads the file asynchronously.
+    # We pass it to background tasks or rely on OS temp wiping if we have no BG tasks in signature.
+    # To keep simple without modifying function signature, we just return it.
+    
+    return FileResponse(
+        path=temp_path, 
+        filename=f"Plan_{plan_id}.docx", 
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    )

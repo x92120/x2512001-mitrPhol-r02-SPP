@@ -167,7 +167,9 @@ def test_get_production_batches(client):
 def test_create_prebatch_record(client):
     """Test creating a prebatch record"""
     # Get a plan_id first
-    plans = client.get("/production-plans/").json()
+    response = client.get("/production-plans/")
+    data = response.json()
+    plans = data.get("plans", data) if isinstance(data, dict) else data
     if len(plans) > 0:
         plan_id = plans[0]["plan_id"]
         

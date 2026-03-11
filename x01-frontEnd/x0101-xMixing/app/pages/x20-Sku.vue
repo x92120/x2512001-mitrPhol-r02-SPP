@@ -751,7 +751,8 @@ const saveStep = async () => {
     const res = await fetch(url, { method: isNew ? 'POST' : 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(stepForm.value) })
     if (!res.ok) {
       const err = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }))
-      $q.notify({ type: 'negative', message: err.detail || t('sku.saveFailed') })
+      const msg = typeof err.detail === 'string' ? err.detail : JSON.stringify(err.detail, null, 2)
+      $q.notify({ type: 'negative', message: msg || t('sku.saveFailed') })
       return
     }
     $q.notify({ type: 'positive', message: `${t('sku.steps')} ${isNew ? t('sku.stepCreated') : t('sku.stepUpdated')}` })

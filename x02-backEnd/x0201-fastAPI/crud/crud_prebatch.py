@@ -180,32 +180,7 @@ def delete_prebatch_rec(db: Session, record_id: int) -> bool:
         return False
 
 
-# ---------------------------------------------------------------------------
-# PreBatch Requirement CRUD
-# ---------------------------------------------------------------------------
 
-def get_prebatch_reqs_by_batch(db: Session, batch_id: str) -> List[models.PreBatchReq]:
-    """Get ingredient requirements for a specific batch, with prebatch recs."""
-    return db.query(models.PreBatchReq).options(
-        selectinload(models.PreBatchReq.recs)
-    ).filter(models.PreBatchReq.batch_id == batch_id).all()
-
-
-def update_prebatch_req_status(db: Session, batch_id: str, re_code: str, status: int) -> bool:
-    """Update requirement status (0=Pending, 1=In-Progress, 2=Completed)."""
-    req = db.query(models.PreBatchReq).filter(
-        models.PreBatchReq.batch_id == batch_id,
-        models.PreBatchReq.re_code == re_code,
-    ).first()
-    if req:
-        req.status = status
-        db.commit()
-        return True
-    return False
-
-
-def get_prebatch_req(db: Session, req_id: int) -> Optional[models.PreBatchReq]:
-    return db.query(models.PreBatchReq).filter(models.PreBatchReq.id == req_id).first()
 
 
 def ensure_prebatch_reqs_for_batch(db: Session, batch_id: str) -> bool:
