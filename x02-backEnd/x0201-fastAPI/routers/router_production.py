@@ -269,6 +269,16 @@ def get_production_batch_by_id_str(batch_id_str: str, db: Session = Depends(get_
         raise HTTPException(status_code=404, detail="Production batch not found")
     return db_batch
 
+@router.post("/production-batches/by-batch-id/{batch_id_str}/ensure-reqs")
+def ensure_batch_reqs(batch_id_str: str, db: Session = Depends(get_db)):
+    """Ensure PreBatchReq records exist for a batch (creates from SKU recipe if missing)."""
+    from crud.crud_prebatch import ensure_prebatch_reqs_for_batch
+    success = ensure_prebatch_reqs_for_batch(db, batch_id_str)
+    if not success:
+        raise HTTPException(status_code=400, detail="Could not create requirements")
+    reqs = db.query(models.PreBatchReq).filter(models.PreBatchReq.batch_id == batch_id_str).all()
+    return [{"id": r.id, "re_code": r.re_code, "batch_id": r.batch_id, "required_volume": r.required_volume, "wh": r.wh} for r in reqs]
+
 
 # =============================================================================
 # PREBATCH RECORD ENDPOINTS
