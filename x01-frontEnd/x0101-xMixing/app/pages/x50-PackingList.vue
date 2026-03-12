@@ -539,9 +539,13 @@ const fetchReadyToDeliver = async () => {
           id: `${b.batch_id}-FH`,
           wh: 'FH',
           batch_id: b.batch_id,
-          bagsCount: 0,
+          bagsCount: b.fh_packed || b.fh_total || 0,
           time: new Date(b.fh_boxed_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
           inProduction: !!b.production,
+          sku_id: b.sku_id,
+          batch_size: b.batch_size,
+          fh_total: b.fh_total || 0,
+          fh_packed: b.fh_packed || 0,
         })
       }
       if (b.spp_boxed_at) {
@@ -549,9 +553,13 @@ const fetchReadyToDeliver = async () => {
           id: `${b.batch_id}-SPP`,
           wh: 'SPP',
           batch_id: b.batch_id,
-          bagsCount: 0,
+          bagsCount: b.spp_packed || b.spp_total || 0,
           time: new Date(b.spp_boxed_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
           inProduction: !!b.production,
+          sku_id: b.sku_id,
+          batch_size: b.batch_size,
+          spp_total: b.spp_total || 0,
+          spp_packed: b.spp_packed || 0,
         })
       }
       // Populate deliveredMap from DB (keyed per WH: "batch_id-FH" / "batch_id-SPP")
@@ -773,12 +781,18 @@ interface TransferredBox {
   inProduction: boolean
   // Status pipeline flags
   batch_size?: number
+  sku_id?: string
   flavour_house?: boolean
   spp_flag?: boolean
   batch_prepare?: boolean
   ready_to_product?: boolean
   production_flag?: boolean
   done?: boolean
+  // Packing counts
+  fh_total?: number
+  fh_packed?: number
+  spp_total?: number
+  spp_packed?: number
 }
 const transferredBoxes = ref<TransferredBox[]>([])
 const allBatchStatuses = ref<any[]>([])
