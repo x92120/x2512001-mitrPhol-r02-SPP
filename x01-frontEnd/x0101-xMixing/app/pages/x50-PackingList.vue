@@ -2214,16 +2214,7 @@ onMounted(async () => {
                 <q-btn flat round dense icon="unfold_less" size="xs" color="white" @click="collapseAllBoxes()">
                   <q-tooltip>Collapse All</q-tooltip>
                 </q-btn>
-                <q-select
-                  v-model="deliveryWhFilter"
-                  :options="[{ label: 'ALL', value: 'ALL' }, { label: 'FH', value: 'FH' }, { label: 'SPP', value: 'SPP' }]"
-                  emit-value map-options dense outlined
-                  style="min-width:60px;background:rgba(255,255,255,0.15);border-radius:4px;"
-                  input-class="text-white text-caption"
-                  popup-content-class="text-caption"
-                  color="white"
-                  dark
-                />
+
                 <q-select
                   v-model="filterDeliveryStatus"
                   :options="[{ label: 'Show All', value: 'SHOW_ALL' }, { label: 'All', value: 'ALL' }, { label: 'Waiting', value: 'WAITING' }]"
