@@ -1657,14 +1657,32 @@ const processBagScan = async (rawScan: string) => {
   if (bag) {
     if (isPacked(bag)) {
       playSound('wrong')
-      $q.notify({ type: 'warning', icon: 'error', message: 'This PreBatch already Boxed!', caption: bag.batch_record_id || bag.re_code, position: 'top', timeout: 3000 })
+      const wh = (bag.wh || filterMiddleWh.value) as 'FH' | 'SPP'
+      $q.dialog({
+        title: 'PreBatch Already Boxed!',
+        message: `${bag.batch_record_id || bag.re_code} is already packed.\n\nWould you like to reprint the Packing Box Label?`,
+        cancel: { label: 'Close', color: 'grey', flat: true },
+        ok: { label: 'Reprint Label', color: 'blue', icon: 'print' },
+        persistent: false,
+      }).onOk(async () => {
+        await printBoxLabel(wh)
+      })
     } else {
       await onSimScanClick(bag) // Handles the frontend UI packing logic + notifying
     }
   } else if (item) {
     if (item.packing_status === 1) {
       playSound('wrong')
-      $q.notify({ type: 'warning', icon: 'error', message: 'This PreBatch already Boxed!', caption: item.batch_record_id || item.re_code, position: 'top', timeout: 3000 })
+      const wh = (item.wh || filterMiddleWh.value) as 'FH' | 'SPP'
+      $q.dialog({
+        title: 'PreBatch Already Boxed!',
+        message: `${item.batch_record_id || item.re_code} is already packed.\n\nWould you like to reprint the Packing Box Label?`,
+        cancel: { label: 'Close', color: 'grey', flat: true },
+        ok: { label: 'Reprint Label', color: 'blue', icon: 'print' },
+        persistent: false,
+      }).onOk(async () => {
+        await printBoxLabel(wh)
+      })
     } else {
       playSound('correct')
       try {
