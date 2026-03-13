@@ -1109,6 +1109,49 @@ const onCloseBox = (wh: 'FH' | 'SPP') => {
   })
 }
 
+// ── Reprint Box Label for already-closed box ──────────────
+const reprintBoxLabel = async (box: any) => {
+  try {
+    $q.notify({ type: 'info', icon: 'print', message: `Reprinting label for ${box.batch_id} [${box.wh}]...`, position: 'top', timeout: 1500 })
+
+    // Save current state
+    const prevBatch = selectedBatch.value
+    const prevRecords = batchRecords.value
+
+    // Temporarily load the batch data for printing
+    const batchId = box.batch_id
+    // Load batch items
+    const itemsData: any = await $fetch(`${appConfig.apiBaseUrl}/prebatch-items/by-batch/${batchId}`, {
+      headers: getAuthHeader() as Record<string, string>,
+    })
+    // Load batch records (per-package)
+    let recsData: any[] = []
+    try {
+      recsData = await $fetch(`${appConfig.apiBaseUrl}/prebatch-recs/by-batch/${batchId}`, {
+        headers: getAuthHeader() as Record<string, string>,
+      }) as any[]
+    } catch { /* no recs — OK */ }
+
+    // Find the plan and batch info
+    const plan = plans.value.find((p: any) => p.batches?.some((b: any) => b.batch_id === batchId))
+    const batchData = plan?.batches?.find((b: any) => b.batch_id === batchId)
+
+    // Temporarily set state for printing
+    selectedBatch.value = { batch_id: batchId, reqs: itemsData || [], ...batchData }
+    batchRecords.value = recsData
+
+    // Print
+    await printBoxLabel(box.wh as 'FH' | 'SPP')
+
+    // Restore state
+    selectedBatch.value = prevBatch
+    batchRecords.value = prevRecords
+  } catch (e) {
+    console.error('Error reprinting box label:', e)
+    $q.notify({ type: 'negative', message: `Failed to reprint label for ${box.batch_id}` })
+  }
+}
+
 // ── Print Functions (composable) ──────────────────────────────────
 const { printPackingBoxReport, printTransferReport, printBoxLabel, printBagLabel } = usePackingPrints({
   $q,
@@ -2925,7 +2968,16 @@ onMounted(async () => {
                   </q-item-label>
                   <q-item-label caption>{{ box.bagsCount }} bags · {{ box.time }}</q-item-label>
                 </q-item-section>
-                <q-item-section side>
+                <q-item-section side class="row items-center no-wrap q-gutter-xs">
+                  <q-btn
+                    flat round dense
+                    icon="print"
+                    size="sm"
+                    color="grey-7"
+                    @click.stop="reprintBoxLabel(box)"
+                  >
+                    <q-tooltip>Reprint Box Label</q-tooltip>
+                  </q-btn>
                   <q-badge
                     :color="box.wh === 'FH' ? 'blue-7' : 'light-blue-7'"
                     :label="box.wh === 'FH' ? 'FH→SPP' : 'SPP→Prod'"
