@@ -1139,8 +1139,9 @@ def get_batches_awaiting_recheck(db: Session = Depends(get_db)):
 @router.get("/prebatch-recs/recheck-batch/{batch_id}")
 def get_recheck_batch_details(batch_id: str, db: Session = Depends(get_db)):
     """
-    Get ALL required items for a batch (FH + SPP) for re-check verification.
-    Merges prebatch_recs (per-package) + prebatch_items (per-ingredient fallback).
+    Get ALL required items for a batch for re-check verification.
+    Source of truth: prebatch_reqs (requirements).
+    Cross-referenced with: prebatch_recs (actual packed packages).
     """
     # 1. Find the production batch
     batch = db.query(models.ProductionBatch).filter(
@@ -1154,62 +1155,52 @@ def get_recheck_batch_details(batch_id: str, db: Session = Depends(get_db)):
     ).first()
     sku_id = plan.sku_id if plan else None
 
-    # 2. Get all prebatch_recs for this batch (per-package records)
+    # 2. Get all requirements for this batch (source of truth)
+    reqs = db.query(models.PreBatchReq).filter(
+        models.PreBatchReq.batch_id == batch_id
+    ).all()
+
+    # 3. Get all packed records for this batch
     recs = db.query(models.PreBatchRec).filter(
         models.PreBatchRec.batch_record_id.like(f"{batch_id}%")
     ).all()
 
-    # 3. Get all prebatch_items for this batch (unified items)
-    items = db.query(models.PreBatchItem).filter(
-        models.PreBatchItem.batch_id == batch_id
-    ).all()
-
-    # 4. Build checklist: recs first, then items without recs as fallback
-    rec_codes = set(r.re_code for r in recs)
+    # 4. Build checklist from requirements, enriched with packed record data
     checklist = []
+    all_box_ids = set()
 
-    for r in recs:
-        # Get WH from the requirement record
-        req = db.query(models.PreBatchReq).filter(models.PreBatchReq.id == r.req_id).first()
-        wh = req.wh if req and req.wh else "FH"
-        checklist.append({
-            "id": r.id,
-            "source": "rec",
-            "batch_record_id": r.batch_record_id,
-            "re_code": r.re_code,
-            "mat_sap_code": r.mat_sap_code,
-            "wh": wh,
-            "package_no": r.package_no,
-            "total_packages": r.total_packages,
-            "net_volume": r.net_volume,
-            "required_volume": r.total_request_volume or r.total_volume,
-            "recheck_status": r.recheck_status,
-            "recheck_at": r.recheck_at.isoformat() if r.recheck_at else None,
-            "recheck_by": r.recheck_by,
-            "packing_status": r.packing_status,
-        })
+    for req in reqs:
+        # Find matching packed records for this requirement
+        matching_recs = [r for r in recs if r.req_id == req.id]
+        packed_count = len(matching_recs)
+        packed_volume = sum(r.net_volume or 0 for r in matching_recs)
+        total_packages = matching_recs[0].total_packages if matching_recs else 0
 
-    for item in items:
-        wh = item.wh or "Mix"
-        if wh.upper() in ("MIX",):  # Skip non-packing items
-            continue
-        if item.re_code in rec_codes:  # Skip items that already have per-package recs
-            continue
+        # Collect box IDs
+        for r in matching_recs:
+            if r.box_id:
+                all_box_ids.add(r.box_id)
+
+        # Determine recheck status from recs
+        all_checked = packed_count > 0 and all(r.recheck_status == 1 for r in matching_recs)
+        any_error = any(r.recheck_status == 2 for r in matching_recs)
+        recheck_status = 1 if all_checked else (2 if any_error else 0)
+
+        # Batch record IDs for this requirement (for scanning verification)
+        rec_ids = [r.batch_record_id for r in matching_recs]
+
         checklist.append({
-            "id": item.id,
-            "source": "item",
-            "batch_record_id": item.batch_record_id,
-            "re_code": item.re_code,
-            "mat_sap_code": item.mat_sap_code,
-            "wh": wh,
-            "package_no": item.package_no,
-            "total_packages": item.total_packages,
-            "net_volume": item.net_volume,
-            "required_volume": item.required_volume,
-            "recheck_status": item.recheck_status,
-            "recheck_at": item.recheck_at.isoformat() if item.recheck_at else None,
-            "recheck_by": item.recheck_by,
-            "packing_status": item.packing_status,
+            "req_id": req.id,
+            "re_code": req.re_code,
+            "ingredient_name": req.ingredient_name,
+            "wh": req.wh or "FH",
+            "required_volume": req.required_volume or 0,
+            "packed_volume": round(packed_volume, 3),
+            "packed_count": packed_count,
+            "total_packages": total_packages,
+            "recheck_status": recheck_status,
+            "batch_record_ids": rec_ids,
+            "status": req.status,  # 0=Pending, 1=In-Progress, 2=Completed
         })
 
     # 5. Summary
@@ -1218,16 +1209,13 @@ def get_recheck_batch_details(batch_id: str, db: Session = Depends(get_db)):
     errors = sum(1 for c in checklist if c["recheck_status"] == 2)
     pending = total - checked - errors
 
-    # Collect distinct packing box IDs from recs
-    box_ids = sorted(set(r.box_id for r in recs if r.box_id))
-
     return {
         "batch_id": batch_id,
         "plan_id": plan.plan_id if plan else None,
         "sku_id": sku_id,
         "sku_name": plan.sku_name if plan else "Unknown",
         "plant": batch.plant,
-        "box_ids": box_ids,
+        "box_ids": sorted(all_box_ids),
         "fh_boxed_at": batch.fh_boxed_at.isoformat() if batch.fh_boxed_at else None,
         "spp_boxed_at": batch.spp_boxed_at.isoformat() if batch.spp_boxed_at else None,
         "checklist": checklist,

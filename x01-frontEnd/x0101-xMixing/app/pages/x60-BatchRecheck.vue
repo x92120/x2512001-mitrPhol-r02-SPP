@@ -894,20 +894,24 @@ onMounted(() => {
                 <tr>
                   <th class="text-center" style="width:28px">St</th>
                   <th class="text-left">RE Code</th>
-                  <th class="text-right">Volume</th>
+                  <th class="text-left">Name</th>
+                  <th class="text-right">Required</th>
+                  <th class="text-right">Packed</th>
                   <th class="text-left">Pkg</th>
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="c in recheckFH" :key="c.id + '-' + c.source"
+                <tr v-for="c in recheckFH" :key="c.req_id"
                   :class="{ 'bg-green-1': c.recheck_status === 1, 'bg-red-1': c.recheck_status === 2 }">
                   <td class="text-center">
                     <q-icon :name="c.recheck_status === 1 ? 'check_circle' : (c.recheck_status === 2 ? 'error' : 'radio_button_unchecked')"
                       :color="c.recheck_status === 1 ? 'green' : (c.recheck_status === 2 ? 'red' : 'grey')" size="14px" />
                   </td>
-                  <td class="text-weight-medium">{{ c.re_code }}</td>
-                  <td class="text-right">{{ (c.net_volume || 0).toFixed(3) }}</td>
-                  <td>{{ c.package_no || '-' }}/{{ c.total_packages || '-' }}</td>
+                  <td class="text-weight-bold">{{ c.re_code }}</td>
+                  <td style="max-width:120px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{{ c.ingredient_name || '-' }}</td>
+                  <td class="text-right">{{ (c.required_volume || 0).toFixed(3) }}</td>
+                  <td class="text-right">{{ (c.packed_volume || 0).toFixed(3) }}</td>
+                  <td>{{ c.packed_count || 0 }}/{{ c.total_packages || '?' }}</td>
                 </tr>
               </tbody>
             </q-markup-table>
@@ -932,20 +936,24 @@ onMounted(() => {
                 <tr>
                   <th class="text-center" style="width:28px">St</th>
                   <th class="text-left">RE Code</th>
-                  <th class="text-right">Volume</th>
+                  <th class="text-left">Name</th>
+                  <th class="text-right">Required</th>
+                  <th class="text-right">Packed</th>
                   <th class="text-left">Pkg</th>
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="c in recheckSPP" :key="c.id + '-' + c.source"
+                <tr v-for="c in recheckSPP" :key="c.req_id"
                   :class="{ 'bg-green-1': c.recheck_status === 1, 'bg-red-1': c.recheck_status === 2 }">
                   <td class="text-center">
                     <q-icon :name="c.recheck_status === 1 ? 'check_circle' : (c.recheck_status === 2 ? 'error' : 'radio_button_unchecked')"
                       :color="c.recheck_status === 1 ? 'green' : (c.recheck_status === 2 ? 'red' : 'grey')" size="14px" />
                   </td>
-                  <td class="text-weight-medium">{{ c.re_code }}</td>
-                  <td class="text-right">{{ (c.net_volume || 0).toFixed(3) }}</td>
-                  <td>{{ c.package_no || '-' }}/{{ c.total_packages || '-' }}</td>
+                  <td class="text-weight-bold">{{ c.re_code }}</td>
+                  <td style="max-width:120px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{{ c.ingredient_name || '-' }}</td>
+                  <td class="text-right">{{ (c.required_volume || 0).toFixed(3) }}</td>
+                  <td class="text-right">{{ (c.packed_volume || 0).toFixed(3) }}</td>
+                  <td>{{ c.packed_count || 0 }}/{{ c.total_packages || '?' }}</td>
                 </tr>
               </tbody>
             </q-markup-table>
