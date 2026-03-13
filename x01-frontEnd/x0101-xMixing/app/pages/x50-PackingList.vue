@@ -1004,57 +1004,34 @@ const onResumeBox = async (pausedBox: any) => {
 
 const onCloseBox = (wh: 'FH' | 'SPP') => {
   if (!selectedBatch.value) return
-  const scannedBagsForWh = currentBoxScans.value.filter(bag => (wh === 'FH' ? isFH(bag.wh) : isSPP(bag.wh)))
-  if (scannedBagsForWh.length === 0) {
-     $q.notify({ type: 'warning', message: `No bags scanned for ${wh} box yet.`, position: 'top' })
+  const batchId = selectedBatch.value.batch_id
+
+  // Get all reqs for this WH from selectedBatch.reqs
+  const whReqs = ((selectedBatch.value.reqs || []) as any[]).filter((r: any) =>
+    wh === 'FH' ? isFH(r.wh || '') : isSPP(r.wh || '')
+  )
+  const boxedReqs = whReqs.filter((r: any) => r.packing_status === 1)
+  const waitReqs = whReqs.filter((r: any) => r.packing_status !== 1)
+
+  if (whReqs.length === 0) {
+     $q.notify({ type: 'warning', message: `No items found for ${wh} box.`, position: 'top' })
      return
   }
-  const batchId = selectedBatch.value.batch_id
+
+  const allBoxed = waitReqs.length === 0
+  const statusMsg = allBoxed
+    ? `All ${boxedReqs.length} items are boxed. Seal this box and print label?`
+    : `${boxedReqs.length}/${whReqs.length} items boxed (${waitReqs.length} still waiting). Seal this box anyway?`
+
   $q.dialog({
     title: `Close ${wh} Packing Box`,
-    message: `You have scanned ${scannedBagsForWh.length} bags. Seal this box and print label?`,
+    message: statusMsg,
     cancel: true,
     persistent: true,
-    ok: { label: 'Seal & Print', color: wh === 'FH' ? 'blue' : 'light-blue', icon: 'check_circle' },
+    ok: { label: 'Seal & Print', color: allBoxed ? 'green' : 'orange', icon: 'check_circle' },
   }).onOk(async () => {
     try {
-      // 1. Mark all scanned items as packed individually
-      for (const bag of scannedBagsForWh) {
-        // Update prebatch_recs (legacy) - only if bag has a prebatch rec id
-        if (bag.batch_record_id || bag.prebatch_id) {
-          try {
-            await $fetch(`${appConfig.apiBaseUrl}/prebatch-recs/${bag.id}/packing-status`, {
-              method: 'PATCH',
-              headers: getAuthHeader() as Record<string, string>,
-              body: { packing_status: 1, packed_by: 'operator' },
-            })
-          } catch (e) {
-            // Expected to fail if bag.id is a prebatch_item id, not a rec id
-          }
-        }
-
-        // Update prebatch_items (new unified table)
-        // The bag itself might BE a req item from onItemClick — use its id directly
-        const whMatcher = wh === 'FH' ? isFH : isSPP
-        const matchingItem = selectedBatch.value.reqs?.find((r: any) =>
-          r.re_code === bag.re_code && whMatcher(r.wh || '')
-        ) || (bag.required_volume !== undefined ? bag : null) // bag IS a req
-        
-        if (matchingItem) {
-          try {
-            await $fetch(`${appConfig.apiBaseUrl}/prebatch-items/${matchingItem.id}/packing-status`, {
-              method: 'PATCH',
-              headers: getAuthHeader() as Record<string, string>,
-              body: { packing_status: 1, packed_by: 'operator' },
-            })
-            matchingItem.packing_status = 1
-          } catch (e) {
-            console.error(`Failed to update packing status for item ${matchingItem.id}:`, e)
-          }
-        }
-      }
-
-      // 2. Close the box on the batch
+      // Close the box on the batch
       console.log(`[CloseBox] Closing ${wh} box for batch ${batchId}...`)
       await $fetch(`${appConfig.apiBaseUrl}/production-batches/by-batch-id/${batchId}/box-close`, {
         method: 'PATCH',
@@ -1071,15 +1048,12 @@ const onCloseBox = (wh: 'FH' | 'SPP') => {
         timeout: 3000,
       })
       
-      // Auto-trigger the print box label function (must await before clearing scans)
+      // Auto-trigger the print box label function
       await printBoxLabel(wh)
-      
-      // Clear current box session for this WH (after print is done reading the data)
-      currentBoxScans.value = currentBoxScans.value.filter(bag => (wh === 'FH' ? !isFH(bag.wh) : !isSPP(bag.wh)))
       
       // Refresh data
       await fetchBatchRecords(batchId)
-      await fetchAllRecords() // Refresh middle panel
+      await fetchAllRecords()
       await fetchReadyToDeliver()
       console.log(`[CloseBox] Data refreshed. Transferred boxes:`, transferredBoxes.value.length)
 
