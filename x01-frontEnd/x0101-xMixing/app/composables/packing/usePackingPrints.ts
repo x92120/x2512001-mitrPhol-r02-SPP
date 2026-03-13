@@ -314,9 +314,10 @@ export const usePackingPrints = (deps: PackingPrintDeps) => {
             return wh === 'FH' ? isFH(rWh) : isSPP(rWh)
         }
         const reqsFallback = ((deps.selectedBatch.value.reqs || []) as any[]).filter(whFilter)
-        const allItems = whRecs.length > 0
-            ? whRecs
-            : (bagsWh.length > 0 ? bagsWh : reqsFallback)
+        // Merge: prebatch_recs (per-package) + prebatch_items for re_codes without recs
+        const recCodes = new Set(whRecs.map((r: any) => r.re_code))
+        const missingReqs = reqsFallback.filter((r: any) => !recCodes.has(r.re_code))
+        const allItems = [...whRecs, ...missingReqs]
         // Only show items that are BOXED (packing_status === 1) on the label
         const items = allItems.filter((r: any) => r.packing_status === 1)
 
