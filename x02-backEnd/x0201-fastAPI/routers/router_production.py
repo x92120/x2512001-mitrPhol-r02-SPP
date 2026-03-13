@@ -18,7 +18,8 @@ from database import get_db
 
 from pydantic import BaseModel
 class RecheckBagRequest(BaseModel):
-    box_id: str
+    box_id: str = ""  # Optional — use batch_id instead for batch-level recheck
+    batch_id: str = ""  # Optional — used for batch-level recheck
     bag_barcode: str
     operator: str
 
@@ -1112,6 +1113,100 @@ def get_production_summary_stats(db: Session = Depends(get_db)):
 # RE-CHECK / VERIFICATION LOGIC
 # =============================================================================
 
+@router.get("/prebatch-recs/recheck-batch/{batch_id}")
+def get_recheck_batch_details(batch_id: str, db: Session = Depends(get_db)):
+    """
+    Get ALL required items for a batch (FH + SPP) for re-check verification.
+    Merges prebatch_recs (per-package) + prebatch_items (per-ingredient fallback).
+    """
+    # 1. Find the production batch
+    batch = db.query(models.ProductionBatch).filter(
+        models.ProductionBatch.batch_id == batch_id
+    ).first()
+    if not batch:
+        raise HTTPException(status_code=404, detail=f"Batch '{batch_id}' not found")
+
+    plan = db.query(models.ProductionPlan).filter(
+        models.ProductionPlan.id == batch.plan_id
+    ).first()
+    sku_id = plan.sku_id if plan else None
+
+    # 2. Get all prebatch_recs for this batch (per-package records)
+    recs = db.query(models.PreBatchRec).filter(
+        models.PreBatchRec.batch_record_id.like(f"{batch_id}%")
+    ).all()
+
+    # 3. Get all prebatch_items for this batch (unified items)
+    items = db.query(models.PreBatchItem).filter(
+        models.PreBatchItem.batch_id == batch_id
+    ).all()
+
+    # 4. Build checklist: recs first, then items without recs as fallback
+    rec_codes = set(r.re_code for r in recs)
+    checklist = []
+
+    for r in recs:
+        checklist.append({
+            "id": r.id,
+            "source": "rec",
+            "batch_record_id": r.batch_record_id,
+            "re_code": r.re_code,
+            "mat_sap_code": r.mat_sap_code,
+            "wh": "FH" if r.re_code and any(r.batch_record_id.startswith(batch_id) for _ in [1]) else "SPP",
+            "package_no": r.package_no,
+            "total_packages": r.total_packages,
+            "net_volume": r.net_volume,
+            "required_volume": r.total_request_volume or r.total_volume,
+            "recheck_status": r.recheck_status,
+            "recheck_at": r.recheck_at.isoformat() if r.recheck_at else None,
+            "recheck_by": r.recheck_by,
+            "packing_status": r.packing_status,
+        })
+
+    for item in items:
+        # Determine WH from item
+        wh = item.wh or "Mix"
+        checklist.append({
+            "id": item.id,
+            "source": "item",
+            "batch_record_id": item.batch_record_id,
+            "re_code": item.re_code,
+            "mat_sap_code": item.mat_sap_code,
+            "wh": wh,
+            "package_no": item.package_no,
+            "total_packages": item.total_packages,
+            "net_volume": item.net_volume,
+            "required_volume": item.required_volume,
+            "recheck_status": item.recheck_status,
+            "recheck_at": item.recheck_at.isoformat() if item.recheck_at else None,
+            "recheck_by": item.recheck_by,
+            "packing_status": item.packing_status,
+        })
+
+    # 5. Summary
+    total = len(checklist)
+    checked = sum(1 for c in checklist if c["recheck_status"] == 1)
+    errors = sum(1 for c in checklist if c["recheck_status"] == 2)
+    pending = total - checked - errors
+
+    return {
+        "batch_id": batch_id,
+        "plan_id": plan.plan_id if plan else None,
+        "sku_id": sku_id,
+        "sku_name": plan.sku_name if plan else "Unknown",
+        "plant": batch.plant,
+        "fh_boxed_at": batch.fh_boxed_at.isoformat() if batch.fh_boxed_at else None,
+        "spp_boxed_at": batch.spp_boxed_at.isoformat() if batch.spp_boxed_at else None,
+        "checklist": checklist,
+        "summary": {
+            "total": total,
+            "checked": checked,
+            "errors": errors,
+            "pending": pending,
+            "all_ok": checked == total and total > 0,
+        }
+    }
+
 @router.get("/prebatch-recs/recheck-box/{box_id}")
 def get_recheck_box_details(box_id: str, db: Session = Depends(get_db)):
     """
@@ -1180,38 +1275,76 @@ def get_recheck_box_details(box_id: str, db: Session = Depends(get_db)):
 @router.post("/prebatch-recs/recheck-bag")
 def verify_bag_scan(data: RecheckBagRequest, db: Session = Depends(get_db)):
     """
-    Verify a single bag scan against a box.
+    Verify a single bag scan against a box or batch.
+    Supports both box-level (box_id) and batch-level (batch_id) recheck.
     """
-    # 1. Find the bag
-    bag = db.query(models.PreBatchRec).filter(models.PreBatchRec.batch_record_id == data.bag_barcode).first()
-    if not bag:
-        raise HTTPException(status_code=404, detail=f"Bag barcode {data.bag_barcode} not found")
+    ref_id = data.batch_id or data.box_id
+    if not ref_id:
+        raise HTTPException(status_code=400, detail="Either box_id or batch_id must be provided")
 
-    # 2. Verify it belongs to the box (prefix match)
-    if not bag.batch_record_id.startswith(data.box_id) and bag.plan_id != data.box_id:
-        raise HTTPException(status_code=400, detail="Bag does not belong to this Box")
+    # 1. Find the bag in prebatch_recs first
+    bag = db.query(models.PreBatchRec).filter(models.PreBatchRec.batch_record_id == data.bag_barcode).first()
+
+    # Also try to find in prebatch_items (SPP items may only exist here)
+    item = None
+    if not bag:
+        item = db.query(models.PreBatchItem).filter(
+            models.PreBatchItem.batch_id == ref_id,
+            models.PreBatchItem.batch_record_id == data.bag_barcode
+        ).first()
+        # Fallback: match by re_code
+        if not item:
+            item = db.query(models.PreBatchItem).filter(
+                models.PreBatchItem.batch_id == ref_id,
+                models.PreBatchItem.re_code == data.bag_barcode
+            ).first()
+
+    if not bag and not item:
+        raise HTTPException(status_code=404, detail=f"Bag barcode '{data.bag_barcode}' not found")
+
+    # 2. Verify it belongs to the batch/box
+    if bag:
+        if data.batch_id:
+            if not bag.batch_record_id.startswith(data.batch_id):
+                raise HTTPException(status_code=400, detail=f"Bag does not belong to batch {data.batch_id}")
+        elif data.box_id:
+            if not bag.batch_record_id.startswith(data.box_id) and bag.plan_id != data.box_id:
+                raise HTTPException(status_code=400, detail="Bag does not belong to this Box")
 
     # 3. Get target and tolerance
-    req = db.query(models.PreBatchReq).filter(models.PreBatchReq.id == bag.req_id).first()
-    target_vol = req.required_volume if req else bag.total_volume
-    
-    plan = db.query(models.ProductionPlan).filter(models.ProductionPlan.plan_id == bag.plan_id).first()
+    if bag:
+        req = db.query(models.PreBatchReq).filter(models.PreBatchReq.id == bag.req_id).first()
+        target_vol = req.required_volume if req else bag.total_volume
+        re_code = bag.re_code
+        plan_id = bag.plan_id
+    else:
+        target_vol = item.required_volume or item.net_volume or 0
+        re_code = item.re_code
+        plan_id = item.plan_id
+
+    plan = db.query(models.ProductionPlan).filter(models.ProductionPlan.plan_id == plan_id).first()
     tolerance = 0.05
     if plan:
         step = db.query(models.SkuStep).filter(
             models.SkuStep.sku_id == plan.sku_id,
-            models.SkuStep.re_code == bag.re_code
+            models.SkuStep.re_code == re_code
         ).first()
         if step:
             tolerance = step.high_tol if step.high_tol > 0 else (target_vol * 0.01)
 
     # 4. Perform check
-    is_ok = abs((bag.net_volume or 0) - (target_vol or 0)) <= tolerance
+    actual_vol = (bag.net_volume if bag else item.net_volume) or 0
+    is_ok = abs(actual_vol - (target_vol or 0)) <= tolerance
 
     # 5. Update Status
-    bag.recheck_status = 1 if is_ok else 2
-    bag.recheck_at = datetime.now()
-    bag.recheck_by = data.operator
+    if bag:
+        bag.recheck_status = 1 if is_ok else 2
+        bag.recheck_at = datetime.now()
+        bag.recheck_by = data.operator
+    if item:
+        item.recheck_status = 1 if is_ok else 2
+        item.recheck_at = datetime.now()
+        item.recheck_by = data.operator
     db.commit()
 
     return {
