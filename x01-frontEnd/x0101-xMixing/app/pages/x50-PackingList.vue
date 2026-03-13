@@ -857,22 +857,38 @@ const filteredBoxScans = computed(() => {
   return currentBoxScans.value.filter(bag => bag.wh === filterMiddleWh.value)
 })
 
-/** Group batchRecords (prebatch_recs) by re_code for current WH — shows each PACKAGE with Wait/Boxed status */
+/** Group items by re_code for current WH — merge prebatch_recs (per-package) + prebatch_items (fallback) */
 interface BoxReqGroup { re_code: string; items: any[] }
 const boxReqsGrouped = computed((): BoxReqGroup[] => {
-  if (batchRecords.value.length === 0) return []
+  if (!selectedBatch.value) return []
   const wh = filterMiddleWh.value
-  const recs = batchRecords.value.filter((r: any) => {
+  const whFilter = (r: any) => {
     if (wh === 'ALL') return true
     if (wh === 'FH') return isFH(r.wh || '')
     if (wh === 'SPP') return isSPP(r.wh || '')
     return r.wh === wh
-  })
+  }
+
+  // 1. Use prebatch_recs (per-package) as primary source  
+  const recs = batchRecords.value.filter(whFilter)
   const map = new Map<string, BoxReqGroup>()
+  const recCodes = new Set<string>()
   for (const r of recs) {
     const code = r.re_code || '?'
+    recCodes.add(code)
     if (!map.has(code)) map.set(code, { re_code: code, items: [] })
     map.get(code)!.items.push(r)
+  }
+
+  // 2. Add prebatch_items that have NO recs (fallback for items without packages)
+  if (selectedBatch.value.reqs) {
+    for (const r of (selectedBatch.value.reqs as any[])) {
+      if (!whFilter(r)) continue
+      if (recCodes.has(r.re_code)) continue // already covered by recs
+      const code = r.re_code || '?'
+      if (!map.has(code)) map.set(code, { re_code: code, items: [] })
+      map.get(code)!.items.push(r)
+    }
   }
   return Array.from(map.values())
 })
@@ -1006,10 +1022,15 @@ const onCloseBox = (wh: 'FH' | 'SPP') => {
   if (!selectedBatch.value) return
   const batchId = selectedBatch.value.batch_id
 
-  // Get all packages for this WH from batchRecords (prebatch_recs — per-package)
-  const whReqs = batchRecords.value.filter((r: any) =>
-    wh === 'FH' ? isFH(r.wh || '') : isSPP(r.wh || '')
+  // Get all items for this WH: prebatch_recs (per-package) + prebatch_items fallback
+  const whMatcher = (r: any) => wh === 'FH' ? isFH(r.wh || '') : isSPP(r.wh || '')
+  const recs = batchRecords.value.filter(whMatcher)
+  const recCodes = new Set(recs.map((r: any) => r.re_code))
+  // Add prebatch_items that have no recs
+  const itemsFallback = ((selectedBatch.value.reqs || []) as any[]).filter((r: any) =>
+    whMatcher(r) && !recCodes.has(r.re_code)
   )
+  const whReqs = [...recs, ...itemsFallback]
   const boxedReqs = whReqs.filter((r: any) => r.packing_status === 1)
   const waitReqs = whReqs.filter((r: any) => r.packing_status !== 1)
 
@@ -1335,9 +1356,24 @@ const onSimScanClick = async (bag: any) => {
           headers: getAuthHeader() as Record<string, string>,
           body: { packing_status: 1, packed_by: 'operator' },
         })
-        matchingRec.packing_status = 1  // Update locally for immediate UI refresh
+        matchingRec.packing_status = 1
       } catch (e) {
-        console.error('Failed to update packing status:', e)
+        console.error('Failed to update prebatch-rec packing status:', e)
+      }
+    } else {
+      // Fallback: update prebatch_items if no prebatch_rec exists for this ingredient
+      const matchingItem = batchReqs.find((r: any) => r.re_code === bag.re_code && r.packing_status !== 1)
+      if (matchingItem) {
+        try {
+          await $fetch(`${appConfig.apiBaseUrl}/prebatch-items/${matchingItem.id}/packing-status`, {
+            method: 'PATCH',
+            headers: getAuthHeader() as Record<string, string>,
+            body: { packing_status: 1, packed_by: 'operator' },
+          })
+          matchingItem.packing_status = 1
+        } catch (e) {
+          console.error('Failed to update prebatch-item packing status:', e)
+        }
       }
     }
 
