@@ -1323,18 +1323,31 @@ const onSimScanClick = async (bag: any) => {
     // Correct — this bag belongs to the selected packing box
     playSound('correct')
 
+    // Find matching req item and update packing_status to 1 (Boxed)
+    const matchingReq = batchReqs.find((r: any) => r.re_code === bag.re_code && r.packing_status !== 1)
+      || batchReqs.find((r: any) => r.re_code === bag.re_code)
+    if (matchingReq && matchingReq.packing_status !== 1) {
+      try {
+        await $fetch(`${appConfig.apiBaseUrl}/prebatch-items/${matchingReq.id}/packing-status`, {
+          method: 'PATCH',
+          headers: getAuthHeader() as Record<string, string>,
+          body: { packing_status: 1, packed_by: 'operator' },
+        })
+        matchingReq.packing_status = 1  // Update locally for immediate UI refresh
+      } catch (e) {
+        console.error('Failed to update packing status:', e)
+      }
+    }
+
     // Add to currentBoxScans if not already there
     if (!currentBoxScans.value.some(b => b.id === bag.id)) {
       currentBoxScans.value.push(bag)
     }
     
-    const whLabel = scanDialogWh.value
-    if (whLabel === 'FH') scanFH.value = bag.batch_record_id
-    else scanSPP.value = bag.batch_record_id
     $q.notify({
       type: 'positive',
       icon: 'check_circle',
-      message: `✅ Correct! ${bag.re_code} added to current box`,
+      message: `✅ ${bag.re_code} packed into box`,
       caption: bag.batch_record_id,
       position: 'top',
       timeout: 2000,
