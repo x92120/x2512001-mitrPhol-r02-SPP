@@ -1519,6 +1519,29 @@ const processBagScan = async (rawScan: string) => {
 
   // 3) Auto Select Box if not selected or different from current scan
   if (inferredBatchId && (!selectedBatch.value || selectedBatch.value?.batch_id !== inferredBatchId)) {
+    // If a box is currently active, ask user before switching
+    if (selectedBatch.value && selectedBatch.value.batch_id !== inferredBatchId) {
+      const currentBatch = selectedBatch.value.batch_id
+      return new Promise<boolean>((resolve) => {
+        $q.dialog({
+          title: 'Different Batch Scanned',
+          message: `You scanned batch "${inferredBatchId}" but current box is "${currentBatch}".\n\nStart a new box or keep scanning current box?`,
+          cancel: { label: 'Keep Current Box', color: 'grey', flat: true },
+          ok: { label: 'Start New Box', color: 'orange', icon: 'swap_horiz' },
+          persistent: true,
+        }).onOk(async () => {
+          // Switch to new batch
+          scanBatchId.value = inferredBatchId!
+          await onScanBatchEnter()
+          resolve(true)
+        }).onCancel(() => {
+          // Stay on current box — play error since it's wrong batch
+          playSound('wrong')
+          $q.notify({ type: 'warning', icon: 'error', message: 'Wrong batch for this box!', caption: `Scanned: ${inferredBatchId} | Current: ${currentBatch}`, position: 'top', timeout: 3000 })
+          resolve(false)
+        })
+      })
+    }
     scanBatchId.value = inferredBatchId
     await onScanBatchEnter() // Automatically loads the batch and displays req ingredients
   }
