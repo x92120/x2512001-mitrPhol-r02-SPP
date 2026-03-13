@@ -1563,37 +1563,28 @@ watch(lastScan, async (scan) => {
   await processBagScan(scan.barcode.trim())
 })
 
-// Auto-close box when all bags for a warehouse are packed
+// Auto-close box when all prebatch items for a warehouse are packed
 watch([allFhPacked, allSppPacked], async ([fhDone, sppDone]) => {
   if (!selectedBatch.value) return
-  const batchId = selectedBatch.value.batch_id
 
-  const autoCloseBox = async (wh: 'FH' | 'SPP') => {
-    try {
-      await $fetch(`${appConfig.apiBaseUrl}/production-batches/by-batch-id/${batchId}/box-close`, {
-        method: 'PATCH',
-        headers: getAuthHeader() as Record<string, string>,
-        body: { wh },
-      })
-      playSound('correct')
-      $q.notify({
-        type: 'positive',
-        icon: 'unarchive',
-        message: `✅ ${wh} Box auto-closed — all bags packed!`,
-        position: 'top',
-        timeout: 3000,
-      })
-      await fetchReadyToDeliver()
-    } catch (e) {
-      console.error(`Auto-close ${wh} box failed:`, e)
-    }
-  }
+  const wh = filterMiddleWh.value === 'ALL' ? 'FH' : filterMiddleWh.value
+  const isCurrentWhDone = wh === 'FH' ? fhDone : sppDone
+  const hasItems = wh === 'FH'
+    ? bagsByWarehouse.value.FH.length > 0
+    : bagsByWarehouse.value.SPP.length > 0
 
-  if (fhDone && bagsByWarehouse.value.FH.length > 0) {
-    await autoCloseBox('FH')
-  }
-  if (sppDone && bagsByWarehouse.value.SPP.length > 0) {
-    await autoCloseBox('SPP')
+  if (isCurrentWhDone && hasItems) {
+    // All prebatch items for current WH are packed — auto trigger close box
+    playSound('correct')
+    $q.notify({
+      type: 'positive',
+      icon: 'check_circle',
+      message: `✅ All ${wh} items packed! Close the box.`,
+      position: 'top',
+      timeout: 2000,
+    })
+    // Trigger close box (with dialog prompt for seal & print)
+    setTimeout(() => onCloseBox(wh as 'FH' | 'SPP'), 500)
   }
 })
 
@@ -2101,12 +2092,13 @@ onMounted(async () => {
           <!-- Current Box Items (compact, scrollable) -->
           <div v-if="filteredBoxScans.length > 0" style="max-height:300px; overflow-y:auto; background:#f5f7fa;">
             <q-list dense separator class="bg-white" style="border-radius:0;">
-              <q-item v-for="(bag, idx) in filteredBoxScans" :key="idx" dense style="min-height:24px">
+              <q-item v-for="(bag, idx) in filteredBoxScans" :key="idx" dense style="min-height:28px">
                 <q-item-section avatar style="min-width:20px">
                    <q-icon name="check_circle" size="xs" color="green-6" />
                 </q-item-section>
                 <q-item-section>
                    <q-item-label style="font-size:0.7rem" class="text-weight-bold">{{ bag.re_code }}</q-item-label>
+                   <q-item-label caption style="font-size:0.58rem;font-family:monospace;color:#666;">{{ bag.batch_record_id || bag.prebatch_id || '' }}</q-item-label>
                 </q-item-section>
                 <q-item-section side>
                    <span style="font-size:0.65rem" class="text-weight-bold text-green-8">
