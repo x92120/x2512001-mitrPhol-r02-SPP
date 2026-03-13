@@ -1114,10 +1114,6 @@ const reprintBoxLabel = async (box: any) => {
   try {
     $q.notify({ type: 'info', icon: 'print', message: `Reprinting label for ${box.batch_id} [${box.wh}]...`, position: 'top', timeout: 1500 })
 
-    // Save current state
-    const prevBatch = selectedBatch.value
-    const prevRecords = batchRecords.value
-
     // Temporarily load the batch data for printing
     const batchId = box.batch_id
     // Load batch items
@@ -1143,9 +1139,13 @@ const reprintBoxLabel = async (box: any) => {
     // Print
     await printBoxLabel(box.wh as 'FH' | 'SPP')
 
-    // Restore state
-    selectedBatch.value = prevBatch
-    batchRecords.value = prevRecords
+    // Clear screen for new scan
+    currentBoxScans.value = []
+    selectedBatch.value = null
+    scanBatchId.value = ''
+    batchRecords.value = []
+    scanFH.value = ''
+    scanSPP.value = ''
   } catch (e) {
     console.error('Error reprinting box label:', e)
     $q.notify({ type: 'negative', message: `Failed to reprint label for ${box.batch_id}` })
