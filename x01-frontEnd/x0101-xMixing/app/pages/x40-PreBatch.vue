@@ -392,6 +392,31 @@ const handleStartWeighting = () => {
     workflowStep.value = 4 // Manual Batching (Weighing)
 }
 
+/**
+ * "Next Intake Lot" — capture current weight from current lot, scan next lot
+ * Used when current lot doesn't have enough volume for full package
+ */
+const handleNextLot = () => {
+    // 1. Capture current scale reading as partial from current lot
+    scalesComposable.onAddLot(selectedIntakeLotId, selectableIngredients, selectedInventoryItem)
+    
+    // 2. Clear current lot selection (but keep ingredient selected)
+    selectedIntakeLotId.value = ''
+    scanLotInput.value = ''
+    scanLotValidated.value = false
+    scanLotError.value = ''
+    
+    // 3. Open scan dialog to scan next lot
+    showScanDialog.value = true
+    
+    $q.notify({ 
+        type: 'info', 
+        message: 'Scan next intake lot to continue weighing', 
+        position: 'top', 
+        timeout: 2000 
+    })
+}
+
 const handleStep7Confirm = (manual = false) => {
     // Determine the logical next step based on remaining items (Step 7 Loop)
     const packages = getPackagePlan(selectedBatch.value?.batch_id, selectedReCode.value, requireVolume.value)
@@ -912,15 +937,24 @@ const onScanLotEnter = async () => {
     return
   }
 
-  if (matchedIngredient.status === 2) {
+  // If already weighing (Step 4 = next lot mode), validate same ingredient
+  const isNextLotMode = workflowStep.value === 4 && selectedReCode.value
+  if (isNextLotMode && matchedIngredient.re_code !== selectedReCode.value) {
+    handleScanError(`Wrong ingredient! Expected: ${selectedReCode.value}, Scanned: ${matchedIngredient.re_code}`)
+    return
+  }
+
+  if (!isNextLotMode && matchedIngredient.status === 2) {
     handleScanError(`Ingredient "${matchedLot.re_code}" is already completed for this plan.`)
     return
   }
 
-  // --- Auto-select the identified ingredient ---
-  selectedReCode.value = matchedIngredient.re_code
-  ingredientsComposable.onSelectIngredient(matchedIngredient)
-  await nextTick()
+  // --- Auto-select the identified ingredient (skip if already selected in next-lot mode) ---
+  if (!isNextLotMode) {
+    selectedReCode.value = matchedIngredient.re_code
+    ingredientsComposable.onSelectIngredient(matchedIngredient)
+    await nextTick()
+  }
 
   // --- VALIDATE CONDITION 2: FIFO check ---
   const lotId = matchedLot.intake_lot_id
@@ -929,11 +963,13 @@ const onScanLotEnter = async () => {
     return
   }
 
-  // Get FIFO lots for this ingredient
+  // Get FIFO lots for this ingredient (exclude already-used lots in current package)
+  const usedLotIds = currentPackageOrigins.value.map(o => o.intake_lot_id.trim().toUpperCase())
   const fifoLots = inventoryRows.value
     .filter(inv => {
       const reMatch = (inv.re_code || '').trim().toUpperCase() === lotReCode
-      return reMatch && inv.remain_vol > 0 && inv.status === 'Active'
+      const notUsed = !usedLotIds.includes((inv.intake_lot_id || '').trim().toUpperCase())
+      return reMatch && inv.remain_vol > 0 && inv.status === 'Active' && notUsed
     })
     .sort((a, b) => {
       const dateA = a.expire_date ? new Date(a.expire_date).getTime() : Infinity
@@ -950,16 +986,25 @@ const onScanLotEnter = async () => {
   }
 
   // --- SUCCESS ---
-  console.log('--- SCAN-FIRST VERIFIED ---', { re_code: matchedIngredient.re_code, lot: lotId })
+  console.log('--- SCAN VERIFIED ---', { re_code: matchedIngredient.re_code, lot: lotId, isNextLot: isNextLotMode })
   scanLotError.value = ''
   scanLotValidated.value = true
   selectedIntakeLotId.value = lotId
   selectedInventoryItem.value = [matchedLot] as any
 
   playSound('correct')
-  $q.notify({ type: 'positive', message: `✅ ${matchedIngredient.re_code} → Lot: ${lotId}`, position: 'top', timeout: 1500 })
+  const msg = isNextLotMode 
+    ? `✅ Next lot: ${lotId} — continue weighing`
+    : `✅ ${matchedIngredient.re_code} → Lot: ${lotId}`
+  $q.notify({ type: 'positive', message: msg, position: 'top', timeout: 1500 })
 
-  // Fetch batch items for the identified ingredient to show progress
+  if (isNextLotMode) {
+    // Next lot mode: close scan dialog, return to weighing (Step 4 already active)
+    showScanDialog.value = false
+    return
+  }
+
+  // First lot: fetch batch items and auto-advance to weighing
   await fetchScanDialogItems()
 
   // Auto-advance to weighing
@@ -1706,9 +1751,25 @@ const refreshPlanData = async () => {
                         />
                     </div>
 
-                    <!-- Step 3: Start PreBatch -->
+                    <!-- Step 3: Start PreBatch / Step 4: Next Lot -->
                     <div class="col-12 col-md-4">
+                        <!-- NEXT LOT button (during weighing, has weight, not yet done) -->
                         <q-btn
+                            v-if="workflowStep === 4 && batchedVolume > 0.001 && !isPackagedVolumeInTol"
+                            label="NEXT LOT"
+                            color="orange-9"
+                            text-color="white"
+                            icon="swap_horiz"
+                            class="full-width"
+                            style="height: 44px"
+                            unelevated
+                            @click="handleNextLot"
+                        >
+                            <q-tooltip>Capture weight from current lot and scan next intake lot</q-tooltip>
+                        </q-btn>
+                        <!-- START button (Step 3) -->
+                        <q-btn
+                            v-else
                             :label="workflowStep === 3 && !isScaleAtZero ? 'CLEAR SCALE' : 'START'"
                             :color="workflowStep === 3 && isScaleAtZero ? 'blue-10' : 'grey-4'"
                             :text-color="workflowStep === 3 && isScaleAtZero ? 'white' : 'grey-7'"
@@ -1986,14 +2047,21 @@ const refreshPlanData = async () => {
     <q-dialog v-model="showScanDialog">
         <q-card style="min-width: 580px; max-width: 720px;">
             <!-- Header with progress -->
-            <q-card-section class="bg-blue-9 text-white row items-center q-pb-xs">
-                <q-icon name="qr_code_scanner" size="sm" class="q-mr-sm" />
-                <div class="text-h6">Prebatch Workflow</div>
-                <q-space />
-                <q-badge v-if="scanProgress.total > 0" color="white" text-color="blue-9" class="text-weight-bold q-mr-sm">
-                    {{ scanProgress.done }} / {{ scanProgress.total }}
-                </q-badge>
-                <q-btn icon="close" flat round dense v-close-popup />
+            <q-card-section class="bg-blue-9 text-white q-pb-xs">
+                <div class="row items-center no-wrap">
+                    <q-icon name="qr_code_scanner" size="sm" class="q-mr-sm" />
+                    <div>
+                        <div class="text-h6" style="line-height: 1.2;">Prebatch Workflow</div>
+                        <div v-if="selectedPlanDetails" class="text-caption" style="opacity: 0.85;">
+                            {{ selectedPlanDetails.sku_id }} — {{ selectedPlanDetails.sku_name || '' }} | Plan: {{ selectedProductionPlan }}
+                        </div>
+                    </div>
+                    <q-space />
+                    <q-badge v-if="scanProgress.total > 0" color="white" text-color="blue-9" class="text-weight-bold q-mr-sm">
+                        {{ scanProgress.done }} / {{ scanProgress.total }}
+                    </q-badge>
+                    <q-btn icon="close" flat round dense v-close-popup />
+                </div>
             </q-card-section>
             <q-linear-progress v-if="scanProgress.total > 0" :value="scanProgress.done / scanProgress.total" color="green" track-color="blue-7" size="4px" />
 
