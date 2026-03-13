@@ -492,8 +492,8 @@ const confirmTransition = (nextStep: number, message: string, onOk?: () => void)
 }
 
 // Global workflow watcher for transitions
-watch([workflowStep, actualScaleValue, () => activeScale.value?.isStable, selectedReCode, selectedIntakeLotId], 
-([step, val, stable, re, lot]) => {
+watch([workflowStep, actualScaleValue, selectedReCode, selectedIntakeLotId], 
+([step, val, re, lot]) => {
     
     // 1. If ingredient selected but no lot -> Scan (Step 2)
     if (re && !lot && step === 1) {
@@ -1362,12 +1362,7 @@ const refreshPlanData = async () => {
                       :class="getDisplayClass(scale)"
                       style="min-height: 80px;"
                     >
-                      <div class="absolute-top-left q-ma-xs row items-center no-wrap" style="pointer-events: none;">
-                        <div 
-                          class="stable-spot shadow-1"
-                          :class="scale.isStable ? 'bg-green-14' : 'bg-orange-14 anim-vibrate'"
-                        ></div>
-                      </div>
+
                       <div class="scale-value text-right" style="width: 100%; padding-right: 4px;">
                         {{ scale.displayValue }}
                       </div>
@@ -2629,24 +2624,5 @@ const refreshPlanData = async () => {
   animation: blink-red 1s infinite;
 }
 
-/* Stable Indicator Styles */
-.stable-spot {
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  border: 2px solid white;
-  transition: all 0.2s ease;
-}
 
-@keyframes vibrate {
-  0% { transform: translate(0); }
-  20% { transform: translate(-2px, 2px); }
-  40% { transform: translate(-2px, -2px); }
-  60% { transform: translate(2px, 2px); }
-  80% { transform: translate(2px, -2px); }
-  100% { transform: translate(0); }
-}
-.anim-vibrate {
-  animation: vibrate 0.2s linear infinite;
-}
 </style>

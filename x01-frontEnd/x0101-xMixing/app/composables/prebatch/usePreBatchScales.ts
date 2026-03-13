@@ -23,39 +23,39 @@ export function usePreBatchScales(deps: ScaleDeps) {
     const scales = ref([
         {
             id: 1,
-            label: 'Scale 1 (10 Kg +/- 0)',
+            label: 'Scale 1 (10 Kg +/- 0.02kg)',
             value: 0.0,
             displayValue: '0.0000',
             unit: 'kg',
             targetScaleId: 'scale-01',
             connected: false,
-            tolerance: 0.00001, // internal tiny epsilon to prevent floating precise failure, practically 0
+            tolerance: 0.02, // internal tiny epsilon to prevent floating precise failure, practically 0
             precision: 4,
             isStable: true,
             isError: false
         },
         {
             id: 2,
-            label: 'Scale 2 (30 Kg +/- 0)',
+            label: 'Scale 2 (30 Kg +/- 0.02kg)',
             value: 0.0,
             displayValue: '0.0000',
             unit: 'kg',
             targetScaleId: 'scale-02',
             connected: false,
-            tolerance: 0.00001,
+            tolerance: 0.02,
             precision: 4,
             isStable: true,
             isError: false
         },
         {
             id: 3,
-            label: 'Scale 3 (150 Kg +/- 0)',
+            label: 'Scale 3 (150 Kg +/- 0.02kg)',
             value: 0.0,
             displayValue: '0.000',
             unit: 'kg',
             targetScaleId: 'scale-03',
             connected: false,
-            tolerance: 0.00001,
+            tolerance: 0.02,
             precision: 3,
             isStable: true,
             isError: false
@@ -114,7 +114,7 @@ export function usePreBatchScales(deps: ScaleDeps) {
 
     const isToleranceExceeded = computed(() => {
         if (!activeScale.value) return false
-        const diff = Math.abs(targetWeight.value - actualScaleValue.value)
+        const diff = parseFloat(Math.abs(targetWeight.value - actualScaleValue.value).toFixed(4))
         return diff > activeScale.value.tolerance
     })
 
@@ -125,15 +125,21 @@ export function usePreBatchScales(deps: ScaleDeps) {
         const currentSum = totalCompletedWeight.value + batchedVolume.value
         const tol = activeScale.value.tolerance
 
-        const diff = Math.abs(totalReq - currentSum)
+        const diff = parseFloat(Math.abs(totalReq - currentSum).toFixed(4))
 
         // Success if total reached within specific scale tolerance
         if (diff <= tol && currentSum > 0) return true
 
         // Check if current individual package matches target
         if (targetWeight.value > 0) {
-            const pkgDiff = Math.abs(targetWeight.value - batchedVolume.value)
+            const pkgDiff = parseFloat(Math.abs(targetWeight.value - batchedVolume.value).toFixed(4))
             if (pkgDiff <= tol) return true
+        }
+
+        // If total requirement already met (previous packages done), check current weight against packageSize
+        if (targetWeight.value === 0 && totalCompletedWeight.value >= totalReq && batchedVolume.value > 0) {
+            const pkgSizeDiff = parseFloat(Math.abs(deps.packageSize.value - batchedVolume.value).toFixed(4))
+            if (pkgSizeDiff <= tol) return true
         }
 
         return false
@@ -144,7 +150,7 @@ export function usePreBatchScales(deps: ScaleDeps) {
         const currentSum = totalCompletedWeight.value + batchedVolume.value
         const tol = activeScale.value?.tolerance || 0.00001
 
-        if (Math.abs(totalReq - currentSum) <= tol && currentSum > 0) return 'green-13'
+        if (parseFloat(Math.abs(totalReq - currentSum).toFixed(4)) <= tol && currentSum > 0) return 'green-13'
         if (batchedVolume.value <= 0) return 'grey-2'
         return isPackagedVolumeInTol.value ? 'green-13' : 'yellow-13'
     })
@@ -291,7 +297,7 @@ export function usePreBatchScales(deps: ScaleDeps) {
     const getDisplayClass = (scale: any) => {
         if (scale.isError) return 'bg-red-blink text-white'
         if (selectedScale.value !== scale.id) return 'bg-grey-4 text-grey-6'
-        const diff = Math.abs(targetWeight.value - scale.value)
+        const diff = parseFloat(Math.abs(targetWeight.value - scale.value).toFixed(4))
         if (targetWeight.value > 0 && diff <= scale.tolerance) return 'bg-green-6 text-white'
         return 'bg-yellow-13 text-black'
     }
