@@ -2214,7 +2214,7 @@ onMounted(async () => {
                   </q-item-section>
                   <q-item-section>
                     <q-item-label style="font-size:0.62rem; font-family:monospace;">
-                      {{ item.batch_record_id || item.prebatch_id || '-' }}
+                      {{ item.batch_record_id || item.prebatch_id || (item.batch_id ? `${item.batch_id}-${item.re_code}` : item.re_code) }}
                     </q-item-label>
                   </q-item-section>
                   <q-item-section side>
