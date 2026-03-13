@@ -389,7 +389,34 @@ const isScaleAtZero = computed(() => {
 })
 
 const handleStartWeighting = () => {
+    // Auto-select scale that has weight (if current scale reads 0)
+    const currentReading = scalesComposable.actualScaleValue.value
+    if (Math.abs(currentReading) < 0.01) {
+        const scaleWithWeight = scalesComposable.scales.value.find(
+            (s: any) => !s.isError && Math.abs(s.value) > 0.01
+        )
+        if (scaleWithWeight) {
+            scalesComposable.selectedScale.value = scaleWithWeight.id
+        }
+    }
     workflowStep.value = 4 // Manual Batching (Weighing)
+}
+
+const onScaleSelect = (scale: any) => {
+    const prevScale = selectedScale.value
+    selectedScale.value = scale.id
+    
+    if (prevScale !== scale.id && workflowStep.value >= 3) {
+        $q.notify({
+            type: 'warning',
+            icon: 'scale',
+            message: `⚖️ Switched to ${scale.label}`,
+            caption: 'Please ensure the scale is tared (zero) before placing material',
+            position: 'top',
+            timeout: 4000,
+            actions: [{ label: 'OK', color: 'white' }]
+        })
+    }
 }
 
 /**
@@ -535,7 +562,24 @@ watch([workflowStep, actualScaleValue, selectedReCode, selectedIntakeLotId],
     if (step === 3 && re && lot) {
         const zeroThreshold = (activeScale.value?.tolerance || 0.01) * 2
         if (Math.abs(val) <= zeroThreshold) {
+            // Auto-select scale with weight before advancing
+            const scaleWithWeight = scalesComposable.scales.value.find(
+                (s: any) => !s.isError && Math.abs(s.value) > 0.01
+            )
+            if (scaleWithWeight && scaleWithWeight.id !== scalesComposable.selectedScale.value) {
+                scalesComposable.selectedScale.value = scaleWithWeight.id
+            }
             workflowStep.value = 4
+        }
+    }
+
+    // 3b. At Step 4, if current scale reads 0 but another has weight → auto-switch
+    if (step === 4 && re && Math.abs(val) < 0.01) {
+        const scaleWithWeight = scalesComposable.scales.value.find(
+            (s: any) => !s.isError && Math.abs(s.value) > 0.01
+        )
+        if (scaleWithWeight && scaleWithWeight.id !== scalesComposable.selectedScale.value) {
+            scalesComposable.selectedScale.value = scaleWithWeight.id
         }
     }
     // 4. If at Step 7 and scale cleared -> confirm takeout
@@ -1469,7 +1513,7 @@ const refreshPlanData = async () => {
           <q-card-section class="q-py-sm">
             <div class="row q-col-gutter-sm">
               <div v-for="scale in scales" :key="scale.id" class="col">
-                <q-card flat :bordered="selectedScale !== scale.id" class="q-pa-xs column cursor-pointer" :class="getScaleClass(scale)" @click="selectedScale = scale.id">
+                <q-card flat :bordered="selectedScale !== scale.id" class="q-pa-xs column cursor-pointer" :class="getScaleClass(scale)" @click="onScaleSelect(scale)">
                   <div class="row justify-between items-center q-mb-xs">
                     <div class="text-caption text-weight-bold">{{ scale.label }}</div>
                     <div 
