@@ -506,8 +506,13 @@ watch([workflowStep, actualScaleValue, selectedReCode, selectedIntakeLotId],
         workflowStep.value = 3
     }
     
-    // 3. Auto-Tare: If at Step 3 and stable zero, enabled START (No auto-advance here, wait for click)
-
+    // 3. Auto-advance: If at Step 3 and scale is at zero, skip START and go directly to Step 4
+    if (step === 3 && re && lot) {
+        const zeroThreshold = (activeScale.value?.tolerance || 0.01) * 2
+        if (Math.abs(val) <= zeroThreshold) {
+            workflowStep.value = 4
+        }
+    }
     // 4. If at Step 7 and scale cleared -> confirm takeout
     if (step === 7) {
         const zeroThreshold = (activeScale.value?.tolerance || 0.01) * 2
@@ -783,6 +788,25 @@ const fetchScanDialogItems = async () => {
 }
 
 /**
+ * Start PreBatch from Plan list — select plan, open scan dialog (no ingredient pre-selected)
+ * Operator scans intake lot → system identifies ingredient → validates → starts weighing
+ */
+const startPreBatch = async (plan: any) => {
+  // 1. Select the plan (triggers ingredient loading)
+  await onPlanShow(plan)
+  await nextTick()
+
+  // 2. Open scan dialog WITHOUT pre-selecting ingredient
+  selectedReCode.value = ''
+  selectedIntakeLotId.value = ''
+  scanLotInput.value = ''
+  scanLotValidated.value = false
+  scanLotError.value = ''
+  scanDialogItems.value = []
+  showScanDialog.value = true
+}
+
+/**
  * Step 1: Click ingredient → open scan dialog
  */
 const openScanDialog = async (ing?: any) => {
@@ -827,7 +851,7 @@ const onScanLotEnter = async () => {
   const scannedValue = scanLotInput.value.trim()
   if (!scannedValue || scanLotValidated.value) return
 
-  console.log('--- SCANNER DIAGNOSIS START ---')
+  console.log('--- SCAN-FIRST WORKFLOW ---')
   console.log('1. Raw Input:', scannedValue)
   
   const rawParts = scannedValue.split('|').map(p => p.trim())
@@ -837,82 +861,108 @@ const onScanLotEnter = async () => {
   // Basic format check
   if (rawParts.length < 2) return
 
-  const expectedReCode = (selectedReCode.value || '').trim().toUpperCase()
-  const expectedSapCode = (scanDialogIngInfo.value?.mat_sap_code || '').trim().toUpperCase()
-  console.log('3. Requirement:', { expectedReCode, expectedSapCode })
-
-  // Debug: Show what we have in inventory for this ingredient
-  const possibleLots = inventoryRows.value.filter(inv => 
-    (inv.re_code || '').trim().toUpperCase() === expectedReCode || 
-    (inv.mat_sap_code || '').trim().toUpperCase() === expectedSapCode
-  )
-  console.log('4. Available Lots in System for this Ingredient:')
-  console.table(possibleLots.map(l => ({ 
-    LotID: l.intake_lot_id, 
-    SupLot: l.lot_id, 
-    Exp: formatDate(l.expire_date),
-    Status: l.status 
-  })))
-
-  // Identify dates in scan (DD/MM/YYYY)
-  const scanDates = parts.filter(p => /^\d{1,2}\/\d{1,2}\/\d{4}$/.test(p))
-
-  // --- MATCHING LOGIC ---
+  // --- SCAN-FIRST: Search ALL inventory for this lot ---
   let matchedLot: any = null
 
-  // Priority 1: Match any part of scan to Lot ID or Supplier Lot ID
+  // Priority 1: Match by Lot ID or Supplier Lot ID across ALL inventory
   for (const part of parts) {
     const pUpper = part.toUpperCase()
-    matchedLot = possibleLots.find(inv => 
-      (inv.intake_lot_id?.trim().toUpperCase() === pUpper) || 
-      (inv.lot_id?.trim().toUpperCase() === pUpper)
+    matchedLot = inventoryRows.value.find(inv => 
+      inv.remain_vol > 0 && inv.status === 'Active' &&
+      ((inv.intake_lot_id?.trim().toUpperCase() === pUpper) || 
+       (inv.lot_id?.trim().toUpperCase() === pUpper))
     )
     if (matchedLot) {
-      console.log('✅ Found match by Lot ID:', part)
+      console.log('✅ Found lot match:', part, '→ re_code:', matchedLot.re_code)
       break
     }
   }
 
-  // Priority 2: Fallback - Match by Expiry Date + SAP Code (if Lot ID is missing/corrupted in scan)
-  if (!matchedLot && scanDates.length > 0) {
-    matchedLot = possibleLots.find(inv => scanDates.includes(formatDate(inv.expire_date)))
-    if (matchedLot) console.log('✅ Found match by Expiry Date Fallback:', formatDate(matchedLot.expire_date))
+  // Priority 2: Fallback by date matching
+  if (!matchedLot) {
+    const scanDates = parts.filter(p => /^\d{1,2}\/\d{1,2}\/\d{4}$/.test(p))
+    if (scanDates.length > 0) {
+      matchedLot = inventoryRows.value.find(inv => 
+        inv.remain_vol > 0 && inv.status === 'Active' &&
+        scanDates.includes(formatDate(inv.expire_date))
+      )
+      if (matchedLot) console.log('✅ Fallback match by date → re_code:', matchedLot.re_code)
+    }
   }
 
   if (!matchedLot) {
-    console.error('❌ NO MATCH FOUND')
-    // If it looks like a real scan but nothing matches, show error
+    console.error('❌ NO MATCH FOUND in inventory')
     if (parts.length > 2) {
-      handleScanError(`Lot not found. System expected a lot for ${expectedReCode} (SAP: ${expectedSapCode})`)
+      handleScanError('Lot not found in inventory. Check if the lot has been received.')
     }
     return
   }
 
-  // Verification
+  // --- VALIDATE CONDITION 1: Is this ingredient in the plan? ---
+  const lotReCode = (matchedLot.re_code || '').trim().toUpperCase()
+  const lotSapCode = (matchedLot.mat_sap_code || '').trim().toUpperCase()
+  const matchedIngredient = selectableIngredients.value.find((ing: any) => {
+    const ingRe = (ing.re_code || '').trim().toUpperCase()
+    const ingSap = (ing.mat_sap_code || '').trim().toUpperCase()
+    return ingRe === lotReCode || (lotSapCode && ingSap === lotSapCode)
+  })
+
+  if (!matchedIngredient) {
+    handleScanError(`Ingredient "${matchedLot.re_code}" is NOT required for this production plan.`)
+    return
+  }
+
+  if (matchedIngredient.status === 2) {
+    handleScanError(`Ingredient "${matchedLot.re_code}" is already completed for this plan.`)
+    return
+  }
+
+  // --- Auto-select the identified ingredient ---
+  selectedReCode.value = matchedIngredient.re_code
+  ingredientsComposable.onSelectIngredient(matchedIngredient)
+  await nextTick()
+
+  // --- VALIDATE CONDITION 2: FIFO check ---
   const lotId = matchedLot.intake_lot_id
   if (matchedLot.status === 'Inactive' || matchedLot.status === 'Hold') {
     handleScanError(`Lot ${lotId} is ${matchedLot.status}.`)
     return
   }
 
-  // FIFO check
-  const recommended = fifoRecommendedLot.value
-  if (recommended && lotId.trim().toUpperCase() !== recommended.intake_lot_id.trim().toUpperCase()) {
-    handleScanError(`FIFO Violation! Use: ${recommended.intake_lot_id}`)
-    return
+  // Get FIFO lots for this ingredient
+  const fifoLots = inventoryRows.value
+    .filter(inv => {
+      const reMatch = (inv.re_code || '').trim().toUpperCase() === lotReCode
+      return reMatch && inv.remain_vol > 0 && inv.status === 'Active'
+    })
+    .sort((a, b) => {
+      const dateA = a.expire_date ? new Date(a.expire_date).getTime() : Infinity
+      const dateB = b.expire_date ? new Date(b.expire_date).getTime() : Infinity
+      return dateA - dateB
+    })
+
+  if (fifoLots.length > 0) {
+    const fifoFirst = fifoLots[0]!
+    if (lotId.trim().toUpperCase() !== fifoFirst.intake_lot_id.trim().toUpperCase()) {
+      handleScanError(`FIFO Violation! Use lot: ${fifoFirst.intake_lot_id} (Exp: ${formatDate(fifoFirst.expire_date)})`)
+      return
+    }
   }
 
-  // SUCCESS
-  console.log('--- SCANNER VERIFIED ---')
+  // --- SUCCESS ---
+  console.log('--- SCAN-FIRST VERIFIED ---', { re_code: matchedIngredient.re_code, lot: lotId })
   scanLotError.value = ''
   scanLotValidated.value = true
   selectedIntakeLotId.value = lotId
   selectedInventoryItem.value = [matchedLot] as any
 
   playSound('correct')
-  $q.notify({ type: 'positive', message: `✅ Verified: ${lotId}`, position: 'top', timeout: 1500 })
+  $q.notify({ type: 'positive', message: `✅ ${matchedIngredient.re_code} → Lot: ${lotId}`, position: 'top', timeout: 1500 })
 
-  // Auto-advance to weighing — SILENTLY
+  // Fetch batch items for the identified ingredient to show progress
+  await fetchScanDialogItems()
+
+  // Auto-advance to weighing
   const pending = nextPendingItem.value
   if (pending) {
     setTimeout(() => {
@@ -1074,6 +1124,19 @@ const refreshPlanData = async () => {
                         <q-item-label>{{ plan.sku_id }} - {{ plan.sku_name || 'No Name' }}</q-item-label>
                         <q-item-label caption>Plan: {{ plan.plan_id }} ({{ plan.batches.length }} batches)</q-item-label>
                       </q-item-section>
+                      <q-item-section side>
+                        <q-btn 
+                          flat dense 
+                          icon="play_circle" 
+                          label="Start" 
+                          size="xs" 
+                          color="green-9" 
+                          class="text-weight-bold"
+                          @click.stop="startPreBatch(plan)"
+                        >
+                          <q-tooltip>Start Pre-Batch for this plan</q-tooltip>
+                        </q-btn>
+                      </q-item-section>
                     </q-item>
                   </template>
                 </q-list>
@@ -1093,6 +1156,8 @@ const refreshPlanData = async () => {
                 <div class="row items-center justify-between no-wrap">
                     <div class="text-subtitle2 text-weight-bold text-blue-grey-8 row items-center no-wrap">
                         {{ t('preBatch.requireIngredient') }}
+                        <!-- Warehouse filter hidden for SPP -->
+                        <!--
                         <q-select
                             v-model="selectedWarehouse"
                             :options="warehouses"
@@ -1112,6 +1177,7 @@ const refreshPlanData = async () => {
                                 <q-icon name="filter_list" size="xs" color="blue-grey-6" />
                             </template>
                         </q-select>
+                        -->
                     </div>
                     <div class="row items-center no-wrap">
                         <q-badge color="blue-grey-6" text-color="white" class="text-weight-bold">
@@ -1187,10 +1253,12 @@ const refreshPlanData = async () => {
                                 <td class="text-center">
                                     <q-btn
                                         v-if="ing.status < 2"
-                                        flat round dense
-                                        icon="scale"
+                                        flat dense
+                                        icon="play_circle"
+                                        label="Start"
                                         size="xs"
-                                        color="blue-9"
+                                        color="green-9"
+                                        class="text-weight-bold"
                                         @click.stop="openScanDialog(ing)"
                                     >
                                         <q-tooltip>Start Pre-Batch Weighing</q-tooltip>
@@ -1284,6 +1352,16 @@ const refreshPlanData = async () => {
                                                                         </td>
                                                                         <td class="text-center">
                                                                             <q-icon v-if="pkg.status === 'done'" name="check_circle" color="green" size="xs" />
+                                                                            <q-btn 
+                                                                                v-if="pkg.log && pkg.log.id" 
+                                                                                flat round dense 
+                                                                                icon="delete_outline" 
+                                                                                size="xs" 
+                                                                                color="red-7" 
+                                                                                @click.stop="onDeleteRecord(pkg.log)"
+                                                                            >
+                                                                                <q-tooltip>Delete this package record</q-tooltip>
+                                                                            </q-btn>
                                                                         </td>
                                                                     </tr>
                                                                 </tbody>
@@ -1346,7 +1424,7 @@ const refreshPlanData = async () => {
           <q-card-section class="q-py-sm">
             <div class="row q-col-gutter-sm">
               <div v-for="scale in scales" :key="scale.id" class="col">
-                <q-card flat :bordered="selectedScale !== scale.id" class="q-pa-xs column" :class="getScaleClass(scale)">
+                <q-card flat :bordered="selectedScale !== scale.id" class="q-pa-xs column cursor-pointer" :class="getScaleClass(scale)" @click="selectedScale = scale.id">
                   <div class="row justify-between items-center q-mb-xs">
                     <div class="text-caption text-weight-bold">{{ scale.label }}</div>
                     <div 
@@ -1869,41 +1947,35 @@ const refreshPlanData = async () => {
 
             <q-card-section class="q-pa-md">
                 <div v-if="recordToDelete">
-                    <p class="text-subtitle1 q-mb-md">
-                        To cancel Package #{{ recordToDelete.package_no }}, scan the label or type the package number (<b>{{ recordToDelete.package_no }}</b>) below:
+                    <p class="text-subtitle1 q-mb-sm">
+                        Cancel Package <b>#{{ recordToDelete.package_no }}</b> — {{ recordToDelete.re_code }}
                     </p>
-                    <q-input 
-                        v-model="deleteInput" 
-                        outlined 
-                        dense 
-                        label="Package Number" 
-                        autofocus
-                        @keyup.enter="onConfirmDeleteManual"
-                    />
+                    <p class="text-caption text-grey-7 q-mb-md">
+                        {{ recordToDelete.batch_record_id }}
+                    </p>
+                    <q-select
+                        v-model="deleteInput"
+                        :options="['Weight Error', 'Wrong Ingredient', 'Label Damaged', 'Contamination', 'Operator Mistake', 'Other']"
+                        outlined
+                        dense
+                        label="Reason for cancellation"
+                        emit-value
+                        map-options
+                    >
+                        <template v-slot:prepend>
+                            <q-icon name="report_problem" color="orange" />
+                        </template>
+                    </q-select>
                 </div>
             </q-card-section>
 
             <q-card-actions align="right" class="q-pa-md bg-grey-1">
-                <!-- Delete Confirmation Scanner Input -->
-                <q-input 
-                    v-if="recordToDelete"
-                    v-model="deleteInput"
-                    outlined
-                    dense
-                    placeholder="Scan label barcode to confirm"
-                    @keyup.enter="onDeleteScanEnter"
-                    class="q-mr-sm"
-                    style="min-width: 250px;"
-                >
-                    <template v-slot:prepend>
-                        <q-icon name="circle" color="positive" />
-                    </template>
-                </q-input>
                 <q-btn :label="t('preBatch.goBack')" flat color="grey-7" v-close-popup />
                 <q-btn 
                     :label="t('preBatch.confirmDeletion')" 
                     color="negative" 
                     unelevated 
+                    :disable="!deleteInput"
                     @click="onConfirmDeleteManual" 
                 />
             </q-card-actions>
@@ -1939,6 +2011,15 @@ const refreshPlanData = async () => {
                     <div>
                         <div class="text-caption text-grey-7">Total Require</div>
                         <div class="text-subtitle2 text-weight-bold text-orange-9">{{ scanDialogIngInfo.total_require.toFixed(4) }} kg</div>
+                    </div>
+                </div>
+            </q-card-section>
+            <q-card-section v-else class="bg-green-1 q-py-sm">
+                <div class="row items-center q-gutter-sm">
+                    <q-icon name="qr_code_scanner" color="green-9" size="md" />
+                    <div>
+                        <div class="text-subtitle1 text-weight-bold text-green-9">Scan intake lot to identify ingredient</div>
+                        <div class="text-caption text-grey-7">System will validate ingredient is in this plan and FIFO is correct</div>
                     </div>
                 </div>
             </q-card-section>

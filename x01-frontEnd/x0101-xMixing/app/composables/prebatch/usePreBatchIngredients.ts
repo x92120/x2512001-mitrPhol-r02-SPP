@@ -76,8 +76,8 @@ export function usePreBatchIngredients(deps: IngredientDeps) {
             const warehouse = (task.wh && task.wh !== '-' ? task.wh : (stock?.warehouse_location || '-')).toUpperCase()
 
             const batchReq = deps.isBatchSelected.value
-                ? (task.required_volume || 0)
-                : (task.total_require || 0)
+                ? (task.required_volume || task.per_batch || task.total_require || 0)
+                : (task.total_require || task.required_volume || 0)
             const perBatch = task.per_batch || task.required_volume || 0
 
             return {

@@ -108,8 +108,7 @@ export function usePreBatchScales(deps: ScaleDeps) {
     })
 
     const requestBatch = computed(() => {
-        if (deps.packageSize.value <= 0) return 0
-        return Math.ceil(deps.requireVolume.value / deps.packageSize.value)
+        return 1 // SPP: always 1 batch per ingredient
     })
 
     const isToleranceExceeded = computed(() => {
@@ -136,8 +135,8 @@ export function usePreBatchScales(deps: ScaleDeps) {
             if (pkgDiff <= tol) return true
         }
 
-        // If total requirement already met (previous packages done), check current weight against packageSize
-        if (targetWeight.value === 0 && totalCompletedWeight.value >= totalReq && batchedVolume.value > 0) {
+        // Fallback: check current weight against packageSize (handles extra packages beyond requirement)
+        if (batchedVolume.value > 0 && deps.packageSize.value > 0) {
             const pkgSizeDiff = parseFloat(Math.abs(deps.packageSize.value - batchedVolume.value).toFixed(4))
             if (pkgSizeDiff <= tol) return true
         }
@@ -330,18 +329,7 @@ export function usePreBatchScales(deps: ScaleDeps) {
         currentPackageOrigins.value.splice(index, 1)
     }
 
-    // --- Watchers ---
-    watch(() => deps.packageSize.value, (val) => {
-        if (val <= 0) {
-            selectedScale.value = 0
-        } else if (val <= 10) {
-            selectedScale.value = 1
-        } else if (val <= 30) {
-            selectedScale.value = 2
-        } else {
-            selectedScale.value = 3
-        }
-    })
+    // Scale selection is manual — operator clicks on a scale card to select it
 
     watch(actualScaleValue, (newVal) => {
         if (deps.selectedReCode.value) {

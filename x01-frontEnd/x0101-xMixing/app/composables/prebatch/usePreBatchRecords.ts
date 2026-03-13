@@ -117,7 +117,8 @@ export function usePreBatchRecords(deps: RecordDeps) {
 
     const executeDeletion = async (record: any) => {
         try {
-            await $fetch(`${appConfig.apiBaseUrl}/prebatch-items/${record.id}/unpack`, {
+            // Use prebatch-recs endpoint for individual package records
+            await $fetch(`${appConfig.apiBaseUrl}/prebatch-recs/${record.id}`, {
                 method: 'DELETE',
                 headers: getAuthHeader() as Record<string, string>
             })
@@ -143,12 +144,12 @@ export function usePreBatchRecords(deps: RecordDeps) {
 
     const onConfirmDeleteManual = async () => {
         if (!recordToDelete.value) return
-        const val = deleteInput.value.trim()
-        if (val === String(recordToDelete.value.package_no) || val === recordToDelete.value.batch_record_id) {
-            await executeDeletion(recordToDelete.value)
-        } else {
-            $q.notify({ type: 'negative', message: 'Invalid input. Please scan the label or type the exact package number.', position: 'top' })
+        if (!deleteInput.value) {
+            $q.notify({ type: 'warning', message: 'Please select a reason for cancellation.', position: 'top' })
+            return
         }
+        console.log(`Cancelling package #${recordToDelete.value.package_no}, reason: ${deleteInput.value}`)
+        await executeDeletion(recordToDelete.value)
     }
 
     const onDeleteScanEnter = async () => {

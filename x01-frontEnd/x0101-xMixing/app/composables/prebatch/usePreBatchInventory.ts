@@ -36,7 +36,7 @@ export function usePreBatchInventory(deps: InventoryDeps) {
 
     // --- State ---
     const warehouses = ref<any[]>([])
-    const selectedWarehouse = ref('')
+    const selectedWarehouse = ref('All')
     const inventoryRows = ref<InventoryItem[]>([])
     const inventoryLoading = ref(false)
     const selectedInventoryItem = ref<InventoryItem[]>([])
@@ -55,18 +55,16 @@ export function usePreBatchInventory(deps: InventoryDeps) {
             const data = await $fetch<any[]>(`${appConfig.apiBaseUrl}/warehouses/`, {
                 headers: getAuthHeader() as Record<string, string>
             })
-            const mapped = data.map(w => ({
-                warehouse_id: w.warehouse_id,
-                name: w.name
-            }))
+            const mapped = data
+                .filter(w => w.warehouse_id === 'FH' || w.warehouse_id === 'SPP')
+                .map(w => ({
+                    warehouse_id: w.warehouse_id,
+                    name: w.name
+                }))
             warehouses.value = [{ warehouse_id: 'All', name: 'All' }, ...mapped]
 
-            if (data.length > 0) {
-                const fh = data.find(w => w.warehouse_id === 'FH')
-                selectedWarehouse.value = fh ? fh.warehouse_id : 'All'
-            } else {
-                selectedWarehouse.value = 'All'
-            }
+            // SPP: always default to 'All' — no department filtering
+            selectedWarehouse.value = 'All'
         } catch (e) {
             console.error('Error fetching warehouses', e)
         }
