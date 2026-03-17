@@ -29,7 +29,7 @@ export function usePreBatchScales(deps: ScaleDeps) {
             unit: 'kg',
             targetScaleId: 'scale-01',
             connected: false,
-            tolerance: 0.02, // internal tiny epsilon to prevent floating precise failure, practically 0
+            tolerance: 0,
             precision: 4,
             isStable: true,
             isError: false
@@ -42,7 +42,7 @@ export function usePreBatchScales(deps: ScaleDeps) {
             unit: 'kg',
             targetScaleId: 'scale-02',
             connected: false,
-            tolerance: 0.02,
+            tolerance: 0,
             precision: 4,
             isStable: true,
             isError: false
@@ -55,7 +55,7 @@ export function usePreBatchScales(deps: ScaleDeps) {
             unit: 'kg',
             targetScaleId: 'scale-03',
             connected: false,
-            tolerance: 0.02,
+            tolerance: 0,
             precision: 3,
             isStable: true,
             isError: false
@@ -108,7 +108,10 @@ export function usePreBatchScales(deps: ScaleDeps) {
     })
 
     const requestBatch = computed(() => {
-        return 1 // SPP: always 1 batch per ingredient
+        const reqVol = deps.requireVolume.value || 0
+        const pkgSize = deps.packageSize.value || 0
+        if (reqVol <= 0 || pkgSize <= 0) return 1
+        return Math.ceil(reqVol / pkgSize)
     })
 
     const isToleranceExceeded = computed(() => {

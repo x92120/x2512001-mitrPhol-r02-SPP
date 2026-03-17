@@ -582,6 +582,82 @@ def delete_prebatch_rec(record_id: int, db: Session = Depends(get_db)):
     return {"status": "success"}
 
 
+@router.delete("/prebatch-recs/clear-batch/{batch_id_str}")
+def clear_batch_records(batch_id_str: str, db: Session = Depends(get_db)):
+    """Clear ALL prebatch records for a batch and restore inventory.
+    This resets the batch so it can be re-weighed from scratch."""
+    from sqlalchemy import text as sql_text_clear
+
+    # 1. Find all PreBatchRec records for this batch
+    recs = db.query(models.PreBatchRec).filter(
+        models.PreBatchRec.batch_record_id.like(f"{batch_id_str}%")
+    ).all()
+
+    if not recs:
+        raise HTTPException(status_code=404, detail=f"No records found for batch {batch_id_str}")
+
+    deleted_count = 0
+    for rec in recs:
+        # Restore inventory (same logic as single delete)
+        if rec.intake_lot_id and rec.net_volume:
+            inv = db.query(models.IngredientIntakeList).filter(
+                models.IngredientIntakeList.intake_lot_id == rec.intake_lot_id,
+                models.IngredientIntakeList.re_code == rec.re_code,
+            ).first()
+            if inv:
+                inv.remain_vol = (inv.remain_vol or 0) + (rec.net_volume or 0)
+        db.delete(rec)
+        deleted_count += 1
+
+    # 2. Reset PreBatchItems for this batch
+    items = db.query(models.PreBatchItem).filter(
+        models.PreBatchItem.batch_id == batch_id_str
+    ).all()
+    for item in items:
+        # Clear origins
+        db.query(models.PreBatchItemFrom).filter(
+            models.PreBatchItemFrom.prebatch_item_id == item.id
+        ).delete()
+        # Reset item fields
+        item.batch_record_id = None
+        item.net_volume = None
+        item.package_no = 1
+        item.total_packages = 1
+        item.intake_lot_id = None
+        item.mat_sap_code = None
+        item.prebatch_id = None
+        item.recode_batch_id = None
+        item.total_volume = None
+        item.total_request_volume = None
+        item.weighed_at = None
+        item.recheck_status = 0
+        item.packing_status = 0
+        item.status = 0  # Back to Wait
+
+    # 3. Reset PreBatchReq status
+    reqs = db.query(models.PreBatchReq).filter(
+        models.PreBatchReq.batch_id == batch_id_str
+    ).all()
+    for req in reqs:
+        req.status = 0
+
+    # 4. Reset batch prepare flag
+    batch = db.query(models.ProductionBatch).filter(
+        models.ProductionBatch.batch_id == batch_id_str
+    ).first()
+    if batch:
+        batch.batch_prepare = False
+        if batch.status == "Prepared":
+            batch.status = "In-Progress"
+
+    db.commit()
+    return {
+        "status": "success",
+        "deleted_records": deleted_count,
+        "message": f"Cleared {deleted_count} records for batch {batch_id_str}"
+    }
+
+
 class PackingStatusUpdate(BaseModel):
     packing_status: int  # 0=Unpacked, 1=Packed
     packed_by: Optional[str] = None
@@ -743,6 +819,27 @@ def pack_item(item_id: int, data: schemas.PreBatchItemPack, db: Session = Depend
     if not item:
         raise HTTPException(status_code=404, detail="Item not found")
 
+    # --- GUARD 1: Duplicate batch_record_id check ---
+    if data.batch_record_id:
+        existing_rec = db.query(models.PreBatchRec).filter(
+            models.PreBatchRec.batch_record_id == data.batch_record_id
+        ).first()
+        if existing_rec:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Duplicate: record '{data.batch_record_id}' already exists (package #{existing_rec.package_no})"
+            )
+
+    # --- GUARD 2: Over-pack protection ---
+    required = item.required_volume or 0
+    current_packed = float(item.net_volume or 0)
+    new_weight = float(data.net_volume or 0)
+    if required > 0 and (current_packed + new_weight) > required * 2:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Over-pack rejected: current {current_packed:.4f} + new {new_weight:.4f} = {current_packed + new_weight:.4f} kg exceeds 2× required {required:.4f} kg"
+        )
+
     # Update item metadata (keep latest batch_record_id / package info)
     item.batch_record_id = data.batch_record_id
     item.package_no = data.package_no
@@ -754,7 +851,7 @@ def pack_item(item_id: int, data: schemas.PreBatchItemPack, db: Session = Depend
     if data.new_required_volume is not None:
         item.required_volume = data.new_required_volume
         
-    # ACCUMULATE net_volume instead of overwriting
+    # ACCUMULATE net_volume — add this package's weight
     item.net_volume = (item.net_volume or 0) + (data.net_volume or 0)
     item.total_volume = item.required_volume
     item.total_request_volume = item.required_volume

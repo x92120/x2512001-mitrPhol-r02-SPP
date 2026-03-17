@@ -36,8 +36,6 @@ interface DbOption {
   active: boolean
 }
 const activeDb = ref<ActiveDbInfo | null>(null)
-const dbOptions = ref<DbOption[]>([])
-const dbSwitching = ref(false)
 
 const fetchActiveDb = async () => {
   try {
@@ -46,46 +44,6 @@ const fetchActiveDb = async () => {
   } catch (e) {
     console.error('Active DB fetch error:', e)
   }
-}
-
-const fetchDbOptions = async () => {
-  try {
-    const data = await $fetch<DbOption[]>(`${appConfig.apiBaseUrl}/db-sync/db-options`)
-    dbOptions.value = data
-  } catch (e) {
-    console.error('DB options fetch error:', e)
-  }
-}
-
-const handleSwitchDb = (key: string) => {
-  if (activeDb.value?.key === key) return
-
-  const target = dbOptions.value.find((o: DbOption) => o.key === key)
-  const label = target?.label || key
-
-  $q.dialog({
-    title: 'Switch Active Database',
-    message: `Switch to <b>${label}</b> (${target?.host})?<br><br>All subsequent API calls will use this database.`,
-    html: true,
-    cancel: true,
-    persistent: true,
-    ok: { label: 'Switch', color: key === 'cloudDB' ? 'amber-8' : 'teal-8', icon: target?.icon || 'storage' },
-  }).onOk(async () => {
-    dbSwitching.value = true
-    try {
-      await $fetch(`${appConfig.apiBaseUrl}/db-sync/active-db`, {
-        method: 'POST',
-        body: { key },
-      })
-      await fetchActiveDb()
-      await fetchDbOptions()
-      $q.notify({ type: 'positive', message: `Switched to ${label}`, icon: target?.icon || 'storage' })
-    } catch (e: any) {
-      $q.notify({ type: 'negative', message: 'Failed to switch database', caption: e?.data?.detail || e?.message })
-    } finally {
-      dbSwitching.value = false
-    }
-  })
 }
 
 // ── DB Sync State ──
@@ -107,10 +65,8 @@ const fetchDbStatus = async () => {
   }
 }
 
-const handleSync = async (direction: 'cloud-to-remote' | 'remote-to-cloud') => {
-  const label = direction === 'cloud-to-remote'
-    ? 'Cloud → Remote'
-    : 'Remote → Cloud'
+const handleSync = async (direction: 'remote-to-cloud') => {
+  const label = 'Remote → Cloud'
 
   $q.dialog({
     title: 'Confirm Database Sync',
@@ -211,7 +167,6 @@ const deviceStatusColor = (status: string) => {
 
 onMounted(() => {
   fetchActiveDb()
-  fetchDbOptions()
   fetchDbStatus()
   fetchHostInfo()
   fetchConnectedDevices()
@@ -427,64 +382,23 @@ onUnmounted(() => {
                 <div class="text-subtitle1 text-weight-bold flex items-center">
                   <q-icon name="storage" class="q-mr-xs" />
                   Active Database
-                  <q-spacer />
-                  <q-spinner-dots v-if="dbSwitching" size="20px" color="white" />
                 </div>
               </q-card-section>
               <q-card-section class="q-pt-none">
-                <!-- Current Active DB Display -->
-                <div v-if="activeDb" class="q-mb-md">
+                <div v-if="activeDb">
                   <div class="row items-center q-mb-sm">
-                    <q-icon
-                      :name="activeDb.icon"
-                      size="sm"
-                      class="q-mr-sm"
-                      :color="activeDb.key === 'cloudDB' ? 'amber-4' : 'green-4'"
-                    />
+                    <q-icon name="dns" size="sm" class="q-mr-sm" color="green-4" />
                     <div>
                       <div class="text-subtitle2 text-weight-bold">{{ activeDb.label }}</div>
                       <div class="text-caption opacity-70">{{ activeDb.host }}</div>
                     </div>
                   </div>
-                  <q-badge
-                    :color="activeDb.key === 'cloudDB' ? 'amber' : 'teal'"
-                    text-color="black"
-                    class="q-px-sm"
-                  >
-                    <q-icon :name="activeDb.icon" size="xs" class="q-mr-xs" />
-                    {{ activeDb.key === 'cloudDB' ? 'CLOUD' : 'REMOTE' }}
+                  <q-badge color="teal" text-color="black" class="q-px-sm">
+                    <q-icon name="dns" size="xs" class="q-mr-xs" />
+                    REMOTE
                   </q-badge>
                 </div>
-                <q-skeleton v-else type="rect" height="50px" class="q-mb-md" />
-
-                <!-- DB Selection Buttons -->
-                <div class="column q-gutter-sm">
-                  <q-btn
-                    v-for="opt in dbOptions"
-                    :key="opt.key"
-                    :icon="opt.icon"
-                    :label="opt.label"
-                    :color="opt.key === activeDb?.key
-                      ? (opt.key === 'cloudDB' ? 'amber-8' : 'teal-8')
-                      : 'grey-7'"
-                    :outline="opt.key !== activeDb?.key"
-                    class="full-width"
-                    dense
-                    no-caps
-                    :loading="dbSwitching"
-                    :disable="dbSwitching"
-                    @click="handleSwitchDb(opt.key)"
-                  >
-                    <q-tooltip v-if="opt.key === activeDb?.key">Currently active</q-tooltip>
-                    <template v-slot:append>
-                      <q-icon
-                        v-if="opt.key === activeDb?.key"
-                        name="check_circle"
-                        size="xs"
-                      />
-                    </template>
-                  </q-btn>
-                </div>
+                <q-skeleton v-else type="rect" height="50px" />
               </q-card-section>
             </q-card>
 
@@ -561,12 +475,6 @@ onUnmounted(() => {
               <q-card-section class="q-pt-none">
                 <!-- Connection Status -->
                 <div v-if="dbStatus" class="q-mb-md">
-                  <div class="q-mb-xs row items-center">
-                    <q-icon :name="dbStatus.cloud?.status === 'connected' ? 'cloud_done' : 'cloud_off'" :color="dbStatus.cloud?.status === 'connected' ? 'green-4' : 'red-4'" size="xs" class="q-mr-xs" />
-                    <span class="text-caption">Cloud ({{ dbStatus.cloud?.host }})</span>
-                    <q-spacer />
-                    <q-badge :color="dbStatus.cloud?.status === 'connected' ? 'green' : 'red'" :label="dbStatus.cloud?.status === 'connected' ? `${dbStatus.cloud.tables} tables` : 'offline'" />
-                  </div>
                   <div class="row items-center">
                     <q-icon :name="dbStatus.remote?.status === 'connected' ? 'dns' : 'report_problem'" :color="dbStatus.remote?.status === 'connected' ? 'green-4' : 'red-4'" size="xs" class="q-mr-xs" />
                     <span class="text-caption">Remote ({{ dbStatus.remote?.host }})</span>
@@ -575,28 +483,17 @@ onUnmounted(() => {
                   </div>
                 </div>
 
-                <!-- Sync Buttons -->
+                <!-- Sync Button (Backup to Cloud) -->
                 <q-btn
                   icon="cloud_upload"
-                  label="Remote → Cloud"
+                  label="Backup to Cloud"
                   color="amber-8"
-                  class="full-width q-mb-sm"
+                  class="full-width"
                   dense
                   no-caps
                   :loading="syncLoading === 'remote-to-cloud'"
                   :disable="!!syncLoading"
                   @click="handleSync('remote-to-cloud')"
-                />
-                <q-btn
-                  icon="cloud_download"
-                  label="Cloud → Remote"
-                  color="light-blue-8"
-                  class="full-width"
-                  dense
-                  no-caps
-                  :loading="syncLoading === 'cloud-to-remote'"
-                  :disable="!!syncLoading"
-                  @click="handleSync('cloud-to-remote')"
                 />
               </q-card-section>
             </q-card>

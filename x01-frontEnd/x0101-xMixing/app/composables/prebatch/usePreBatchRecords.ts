@@ -191,6 +191,23 @@ export function usePreBatchRecords(deps: RecordDeps) {
         }
     }, { deep: true })
 
+    const clearAllBatchRecords = async (batchIdStr: string) => {
+        try {
+            const result = await $fetch<any>(`${appConfig.apiBaseUrl}/prebatch-recs/clear-batch/${batchIdStr}`, {
+                method: 'DELETE',
+                headers: getAuthHeader() as Record<string, string>
+            })
+            $q.notify({ type: 'positive', message: result.message || 'All records cleared', icon: 'delete_sweep', position: 'top' })
+            await fetchPreBatchRecords()
+            if (deps.selectedBatch.value) {
+                await deps.fetchPrebatchItems(deps.selectedBatch.value.batch_id)
+            }
+        } catch (err: any) {
+            console.error('Error clearing batch records:', err)
+            $q.notify({ type: 'negative', message: err?.data?.detail || 'Failed to clear records', position: 'top' })
+        }
+    }
+
     return {
         // State
         preBatchLogs,
@@ -212,5 +229,6 @@ export function usePreBatchRecords(deps: RecordDeps) {
         onDeleteRecord,
         onConfirmDeleteManual,
         onDeleteScanEnter,
+        clearAllBatchRecords,
     }
 }

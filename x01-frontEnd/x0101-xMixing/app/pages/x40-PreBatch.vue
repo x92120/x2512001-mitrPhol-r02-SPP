@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useQuasar } from 'quasar'
 
 import { useAuth } from '../composables/useAuth'
@@ -20,10 +20,32 @@ const { generateLabelSvg, printLabel } = useLabelPrinter()
 const { t } = useI18n()
 const { connect: connectMqtt, mqttClient } = useMqttLocalDevice()
 
+/** Parse date safely — handles DD/MM/YYYY, YYYY-MM-DD, ISO, and Date objects */
+const parseDateSafe = (date: any): Date | null => {
+  if (!date) return null
+  if (date instanceof Date) return isNaN(date.getTime()) ? null : date
+  const s = String(date).trim()
+  // DD/MM/YYYY format (e.g. "09/07/2027" = July 9, 2027)
+  const slashMatch = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/)
+  if (slashMatch) {
+    const [, day, month, year] = slashMatch
+    return new Date(Number(year), Number(month) - 1, Number(day))
+  }
+  // DD-MM-YYYY format
+  const dashDMY = s.match(/^(\d{1,2})-(\d{1,2})-(\d{4})$/)
+  if (dashDMY) {
+    const [, day, month, year] = dashDMY
+    return new Date(Number(year), Number(month) - 1, Number(day))
+  }
+  // ISO or other formats
+  const d = new Date(s)
+  return isNaN(d.getTime()) ? null : d
+}
+
 const formatDate = (date: any) => {
   if (!date) return '-'
-  const d = new Date(date)
-  if (isNaN(d.getTime())) return date
+  const d = parseDateSafe(date)
+  if (!d) return String(date)
   return d.toLocaleDateString('en-GB')
 }
 
@@ -142,7 +164,7 @@ const {
   prebatchColumns, filteredPreBatchLogs, totalCompletedWeight,
   completedCount, nextPackageNo, preBatchSummary,
   fetchPreBatchRecords, executeDeletion, onDeleteRecord,
-  onConfirmDeleteManual, onDeleteScanEnter,
+  onConfirmDeleteManual, onDeleteScanEnter, clearAllBatchRecords,
 } = recordsComposable
 
 // Wire forward refs
@@ -368,6 +390,58 @@ const workflowStatus = computed(() => {
     return { id: 0, msg: 'Idle', color: 'grey' }
 })
 
+// --- Tare Popup ---
+const showTarePopup = ref(false)
+const selectedTareScale = ref(0)
+let tarePopupTimer: ReturnType<typeof setTimeout> | null = null
+
+// Parse capacity from scale label, e.g. "Scale 1 (10 Kg +/- 0.02kg)" -> 10
+const getScaleCapacity = (scale: any): number => {
+    const match = scale.label.match(/(\d+)\s*[Kk]g/)
+    return match ? Number(match[1]) : 999
+}
+
+// Auto-select the most suitable scale: smallest capacity that fits the packageSize
+const autoSelectBestScale = () => {
+    const target = packageSize.value || requireVolume.value || 0
+    const sorted = [...scalesComposable.scales.value]
+        .filter(s => !s.isError)
+        .sort((a, b) => getScaleCapacity(a) - getScaleCapacity(b))
+    
+    // Pick smallest scale whose capacity >= target weight
+    const best = sorted.find(s => getScaleCapacity(s) >= target) || sorted[sorted.length - 1]
+    if (best) {
+        selectedTareScale.value = best.id
+        scalesComposable.selectedScale.value = best.id
+    }
+}
+
+const openTarePopup = () => {
+    autoSelectBestScale()
+    showTarePopup.value = true
+    if (tarePopupTimer) clearTimeout(tarePopupTimer)
+    tarePopupTimer = setTimeout(() => {
+        showTarePopup.value = false
+        workflowStep.value = 4
+    }, 5000)
+}
+
+const closeTarePopupAndAdvance = () => {
+    if (tarePopupTimer) clearTimeout(tarePopupTimer)
+    showTarePopup.value = false
+    // Apply the selected scale
+    scalesComposable.selectedScale.value = selectedTareScale.value
+    workflowStep.value = 4
+}
+
+const handleTareAndAdvance = () => {
+    if (selectedTareScale.value) {
+        scalesComposable.selectedScale.value = selectedTareScale.value
+        scalesComposable.onTare(selectedTareScale.value)
+    }
+    closeTarePopupAndAdvance()
+}
+
 const handleDoneClick = async () => {
     const currentBatchId = selectedBatch.value?.batch_id
     const currentReCode = selectedReCode.value
@@ -558,18 +632,20 @@ watch([workflowStep, actualScaleValue, selectedReCode, selectedIntakeLotId],
         workflowStep.value = 3
     }
     
-    // 3. Auto-advance: If at Step 3 and scale is at zero, skip START and go directly to Step 4
+    // 3. At Step 3 and scale is at zero → show tare popup instead of auto-advancing
     if (step === 3 && re && lot) {
         const zeroThreshold = (activeScale.value?.tolerance || 0.01) * 2
         if (Math.abs(val) <= zeroThreshold) {
-            // Auto-select scale with weight before advancing
+            // Auto-select scale with weight before showing popup
             const scaleWithWeight = scalesComposable.scales.value.find(
                 (s: any) => !s.isError && Math.abs(s.value) > 0.01
             )
             if (scaleWithWeight && scaleWithWeight.id !== scalesComposable.selectedScale.value) {
                 scalesComposable.selectedScale.value = scaleWithWeight.id
             }
-            workflowStep.value = 4
+            if (!showTarePopup.value) {
+                openTarePopup()
+            }
         }
     }
 
@@ -778,10 +854,132 @@ const playSound = async (type: 'correct' | 'wrong') => {
 const showScanDialog = ref(false)
 const mainLotInputRef = ref<any>(null)
 const scanDialogItems = ref<any[]>([])
+
+// --- Container Setup Dialog (after scan, before weighing) ---
+const showContainerSetupDialog = ref(false)
+const setupContainerSize = ref(0)
+const setupSelectedScale = ref(0)
+const setupMatchedIngredient = ref('')
+const setupMatchedLot = ref('')
+const setupPendingItem = ref<any>(null)
+
+// --- Production plan pagination ---
+const planPage = ref(1)
+const planPerPage = 5
+const paginatedPlans = computed(() => {
+  const start = (planPage.value - 1) * planPerPage
+  return plansWithBatches.value.slice(start, start + planPerPage)
+})
+const planTotalPages = computed(() => Math.ceil(plansWithBatches.value.length / planPerPage) || 1)
+
+// Reset plan page when filters change
+watch([searchPlanId, searchSkuName], () => { planPage.value = 1 })
+
+// --- Ingredient pagination ---
+const ingredientPage = ref(1)
+const ingredientPerPage = 5
+const paginatedIngredients = computed(() => {
+  const start = (ingredientPage.value - 1) * ingredientPerPage
+  return selectableIngredients.value.slice(start, start + ingredientPerPage)
+})
+const ingredientTotalPages = computed(() => Math.ceil(selectableIngredients.value.length / ingredientPerPage) || 1)
+
+// --- FIFO Violation Dialog ---
+const showFifoViolationDialog = ref(false)
+const fifoViolationScannedLot = ref('')
+const fifoViolationExpectedLot = ref('')
+const fifoViolationExpectedExpiry = ref('')
+const fifoViolationScannedExpiry = ref('')
+const setupCalcPackages = computed(() => {
+  if (setupContainerSize.value <= 0 || requireVolume.value <= 0) return 0
+  return Math.ceil(requireVolume.value / setupContainerSize.value)
+})
+
+// Auto-update scale recommendation when container size changes in setup dialog
+watch(setupContainerSize, (newSize) => {
+  if (!showContainerSetupDialog.value || newSize <= 0) return
+  const sorted = [...scalesComposable.scales.value]
+      .filter(s => !s.isError)
+      .sort((a, b) => getScaleCapacity(a) - getScaleCapacity(b))
+  const best = sorted.find(s => getScaleCapacity(s) >= newSize) || sorted[sorted.length - 1]
+  if (best) setupSelectedScale.value = best.id
+})
+const confirmContainerSetup = () => {
+  if (setupContainerSize.value <= 0 || !setupPendingItem.value) return
+  containerSize.value = setupContainerSize.value
+  packageSize.value = setupContainerSize.value
+  // Apply selected scale
+  if (setupSelectedScale.value) {
+    scalesComposable.selectedScale.value = setupSelectedScale.value
+  }
+  showContainerSetupDialog.value = false
+  
+  // Now proceed to weighing with the pending item
+  const item = setupPendingItem.value
+  onBatchIngredientClick(
+    { batch_id: item.batch_id },
+    { re_code: selectedReCode.value, id: item.req_id, required_volume: item.required_volume, status: item.status },
+    selectedPlanDetails.value
+  )
+  
+  // Advance workflow
+  if (workflowStep.value < 3) {
+    workflowStep.value = 3
+  }
+  $q.notify({ type: 'info', message: `Weighing: ${item.batch_id}`, position: 'top', timeout: 2000 })
+  setupPendingItem.value = null
+
+  // Show tare popup after dialog closes (if scale is at zero)
+  setTimeout(() => {
+    const zeroThreshold = (activeScale.value?.tolerance || 0.01) * 2
+    if (workflowStep.value === 3 && Math.abs(actualScaleValue.value) <= zeroThreshold) {
+      openTarePopup()
+    }
+  }, 500)
+}
 const scanDialogLoading = ref(false)
 const scanLotInput = ref('')
 const scanLotValidated = ref(false)
 const scanLotError = ref('')
+const dialogScanInputRef = ref<any>(null)
+
+// ─── Auto-focus scan input: always keep focus on the scan field ───
+let scanFocusInterval: ReturnType<typeof setInterval> | null = null
+
+const startScanFocusInterval = () => {
+  if (scanFocusInterval) return
+  scanFocusInterval = setInterval(() => {
+    // Priority 1: Dialog scan input (when dialog is open)
+    if (showScanDialog.value && dialogScanInputRef.value) {
+      dialogScanInputRef.value.focus()
+      return
+    }
+    // Priority 2: Main page scan input (when at workflow step 2)
+    if (workflowStep.value === 2 && mainLotInputRef.value) {
+      mainLotInputRef.value.focus()
+    }
+  }, 500)
+}
+
+const stopScanFocusInterval = () => {
+  if (scanFocusInterval) {
+    clearInterval(scanFocusInterval)
+    scanFocusInterval = null
+  }
+}
+
+// Start/stop the focus interval based on dialog or workflow step
+watch([showScanDialog, workflowStep], ([dialogOpen, step]) => {
+  if (dialogOpen || step === 2) {
+    startScanFocusInterval()
+  } else {
+    stopScanFocusInterval()
+  }
+}, { immediate: true })
+
+onBeforeUnmount(() => {
+  stopScanFocusInterval()
+})
 
 const handleScanError = (msg: string) => {
   scanLotError.value = msg
@@ -817,6 +1015,20 @@ const scanDialogTree = computed(() => {
   }
   return Object.values(grouped)
 })
+
+// --- Scan dialog batch pagination (5 per page) ---
+const scanDialogBatchPage = ref<Record<string, number>>({})
+const scanDialogBatchPerPage = 5
+const getScanDialogPage = (planId: string) => scanDialogBatchPage.value[planId] || 1
+const getScanDialogTotalPages = (items: any[]) => Math.ceil(items.length / scanDialogBatchPerPage) || 1
+const getPaginatedScanItems = (planId: string, items: any[]) => {
+  const page = getScanDialogPage(planId)
+  const start = (page - 1) * scanDialogBatchPerPage
+  return items.slice(start, start + scanDialogBatchPerPage)
+}
+const setScanDialogPage = (planId: string, page: number) => {
+  scanDialogBatchPage.value = { ...scanDialogBatchPage.value, [planId]: page }
+}
 
 // Next pending item
 const nextPendingItem = computed(() => {
@@ -910,9 +1122,15 @@ const openScanDialog = async (ing?: any) => {
 watch(scanLotInput, (newVal) => {
   if (!newVal || scanLotValidated.value) return
   
-  // Trigger if we see at least 2 pipes, or if the string is long enough to be a barcode
-  if (newVal.includes('|') && newVal.split('|').length >= 3) {
-    onScanLotEnter()
+  // Auto-trigger scan validation when barcode input is detected:
+  // 1. Has at least 2 delimited segments (pipe or comma): e.g. "intake-2026-02-21-001,9/19"
+  // 2. Or starts with 'intake-' (intake lot label)
+  const hasDelim = newVal.includes('|') || newVal.includes(',')
+  if (hasDelim) {
+    const segCount = newVal.includes('|') ? newVal.split('|').length : newVal.split(',').length
+    if (segCount >= 2) {
+      onScanLotEnter()
+    }
   }
 })
 
@@ -923,12 +1141,14 @@ const onScanLotEnter = async () => {
   console.log('--- SCAN-FIRST WORKFLOW ---')
   console.log('1. Raw Input:', scannedValue)
   
-  const rawParts = scannedValue.split('|').map(p => p.trim())
+  // Support both pipe '|' and comma ',' delimited barcodes
+  const delimiter = scannedValue.includes('|') ? '|' : ','
+  const rawParts = scannedValue.split(delimiter).map(p => p.trim())
   const parts = rawParts.filter(p => p.length > 0)
-  console.log('2. Parsed Parts:', parts)
+  console.log('2. Parsed Parts (delim=' + delimiter + '):', parts)
 
-  // Basic format check
-  if (rawParts.length < 2) return
+  // Basic format check — need at least 2 segments
+  if (parts.length < 2) return
 
   // --- SCAN-FIRST: Search ALL inventory for this lot ---
   let matchedLot: any = null
@@ -961,7 +1181,7 @@ const onScanLotEnter = async () => {
 
   if (!matchedLot) {
     console.error('❌ NO MATCH FOUND in inventory')
-    if (parts.length > 2) {
+    if (parts.length >= 2) {
       handleScanError('Lot not found in inventory. Check if the lot has been received.')
     }
     return
@@ -1009,22 +1229,47 @@ const onScanLotEnter = async () => {
 
   // Get FIFO lots for this ingredient (exclude already-used lots in current package)
   const usedLotIds = currentPackageOrigins.value.map(o => o.intake_lot_id.trim().toUpperCase())
-  const fifoLots = inventoryRows.value
-    .filter(inv => {
-      const reMatch = (inv.re_code || '').trim().toUpperCase() === lotReCode
-      const notUsed = !usedLotIds.includes((inv.intake_lot_id || '').trim().toUpperCase())
-      return reMatch && inv.remain_vol > 0 && inv.status === 'Active' && notUsed
-    })
+  const allLotsForIng = inventoryRows.value.filter(inv => {
+    const reMatch = (inv.re_code || '').trim().toUpperCase() === lotReCode
+    return reMatch && inv.remain_vol > 0 && inv.status === 'Active'
+  })
+  const fifoLots = allLotsForIng
+    .filter(inv => !usedLotIds.includes((inv.intake_lot_id || '').trim().toUpperCase()))
     .sort((a, b) => {
-      const dateA = a.expire_date ? new Date(a.expire_date).getTime() : Infinity
-      const dateB = b.expire_date ? new Date(b.expire_date).getTime() : Infinity
-      return dateA - dateB
+      const dateA = parseDateSafe(a.expire_date)?.getTime() ?? Infinity
+      const dateB = parseDateSafe(b.expire_date)?.getTime() ?? Infinity
+      if (dateA !== dateB) return dateA - dateB
+      // Same expire date → sort by intake_at (earlier intake first)
+      const intakeA = parseDateSafe((a as any).intake_at)?.getTime() ?? Infinity
+      const intakeB = parseDateSafe((b as any).intake_at)?.getTime() ?? Infinity
+      if (intakeA !== intakeB) return intakeA - intakeB
+      return (a.intake_lot_id || '').localeCompare(b.intake_lot_id || '')
     })
+
+  console.log('🔍 FIFO DEBUG:', {
+    scannedLot: lotId,
+    lotReCode,
+    allLotsCount: allLotsForIng.length,
+    fifoLotsCount: fifoLots.length,
+    fifoLots: fifoLots.map(l => ({ lot: l.intake_lot_id, expire: l.expire_date, expParsed: parseDateSafe(l.expire_date)?.toISOString(), intake_at: (l as any).intake_at })),
+    fifoFirst: fifoLots[0]?.intake_lot_id,
+    wouldViolate: fifoLots.length > 0 && lotId.trim().toUpperCase() !== fifoLots[0]?.intake_lot_id.trim().toUpperCase()
+  })
 
   if (fifoLots.length > 0) {
     const fifoFirst = fifoLots[0]!
     if (lotId.trim().toUpperCase() !== fifoFirst.intake_lot_id.trim().toUpperCase()) {
-      handleScanError(`FIFO Violation! Use lot: ${fifoFirst.intake_lot_id} (Exp: ${formatDate(fifoFirst.expire_date)})`)
+      // Show FIFO violation popup
+      fifoViolationScannedLot.value = lotId
+      fifoViolationScannedExpiry.value = formatDate(matchedLot.expire_date)
+      fifoViolationExpectedLot.value = fifoFirst.intake_lot_id
+      fifoViolationExpectedExpiry.value = formatDate(fifoFirst.expire_date)
+      showFifoViolationDialog.value = true
+      playSound('wrong')
+      scanLotInput.value = ''
+      scanLotValidated.value = false
+      // Auto-close after 5 seconds
+      setTimeout(() => { showFifoViolationDialog.value = false }, 5000)
       return
     }
   }
@@ -1049,14 +1294,20 @@ const onScanLotEnter = async () => {
   }
 
   // First lot: fetch batch items and auto-advance to weighing
+  console.log('📦 FETCH scanDialogItems: plan=', selectedProductionPlan.value, 're_code=', selectedReCode.value)
   await fetchScanDialogItems()
+  console.log('📦 scanDialogItems:', JSON.stringify(scanDialogItems.value))
 
   // Auto-advance to weighing
   const pending = nextPendingItem.value
+  console.log('📦 nextPendingItem:', pending, 'workflowStep:', workflowStep.value)
   if (pending) {
     setTimeout(() => {
+      console.log('📦 AUTO-SELECT pending item:', pending.batch_id, 'req_id:', pending.req_id)
       onScanItemSelect(pending)
     }, 400)
+  } else {
+    console.warn('⚠️ No pending item found — cannot auto-advance!')
   }
 }
 
@@ -1065,13 +1316,30 @@ const onScanLotEnter = async () => {
  */
 const onScanItemSelect = (item: any) => {
   if (item.status === 2) return
-  onBatchIngredientClick(
-    { batch_id: item.batch_id },
-    { re_code: selectedReCode.value, id: item.req_id, required_volume: item.required_volume, status: item.status },
-    selectedPlanDetails.value
-  )
+  
+  // Close scan dialog
   showScanDialog.value = false
-  $q.notify({ type: 'info', message: `Weighing: ${item.batch_id}`, position: 'top', timeout: 2000 })
+  
+  // Set requireVolume so the setup dialog can calculate packages
+  requireVolume.value = item.required_volume || 0
+  
+  // Look up std_package_size from ingredient config
+  const ingInfo = selectableIngredients.value.find((i: any) => i.re_code === selectedReCode.value)
+  const stdSize = ingInfo?.std_package_size || 0
+  
+  // Show container setup dialog with matched ingredient info
+  setupMatchedIngredient.value = ingInfo?.ingredient_name || selectedReCode.value
+  setupMatchedLot.value = selectedIntakeLotId.value
+  setupPendingItem.value = item
+  setupContainerSize.value = stdSize > 0 ? Math.min(item.required_volume, stdSize) : item.required_volume
+  // Auto-select best scale for this container size
+  const target = setupContainerSize.value || item.required_volume || 0
+  const sorted = [...scalesComposable.scales.value]
+      .filter(s => !s.isError)
+      .sort((a, b) => getScaleCapacity(a) - getScaleCapacity(b))
+  const best = sorted.find(s => getScaleCapacity(s) >= target) || sorted[sorted.length - 1]
+  setupSelectedScale.value = best?.id || scalesComposable.scales.value[0]?.id || 0
+  showContainerSetupDialog.value = true
 }
 
 
@@ -1127,6 +1395,27 @@ const refreshPlanData = async () => {
                 <q-icon name="filter_alt" size="xs" color="blue-9" />
               </template>
             </q-select>
+          </div>
+          <!-- Department Filter -->
+          <div class="row items-center no-wrap bg-blue-10 q-px-sm q-py-xs rounded-borders shadow-1">
+            <q-icon name="warehouse" size="xs" class="q-mr-xs" />
+            <q-btn-toggle
+              v-model="selectedWarehouse"
+              toggle-color="white"
+              toggle-text-color="blue-9"
+              text-color="blue-2"
+              color="blue-10"
+              dense
+              no-caps
+              unelevated
+              :options="[
+                { label: 'ALL', value: 'All' },
+                { label: 'FH', value: 'FH' },
+                { label: 'SPP', value: 'SPP' },
+              ]"
+              class="text-weight-bold"
+              style="font-size: 0.8rem;"
+            />
           </div>
         </div>
         <div class="row items-center q-gutter-sm">
@@ -1189,11 +1478,10 @@ const refreshPlanData = async () => {
               </div>
             </div>
           </q-card-section>
-          <div class="relative-position" style="height: 200px; overflow: hidden;">
-            <q-scroll-area class="fit">
+          <div class="relative-position">
               <template v-if="plansWithBatches.length > 0">
                 <q-list dense separator class="text-caption">
-                  <template v-for="plan in plansWithBatches" :key="plan.plan_id">
+                  <template v-for="plan in paginatedPlans" :key="plan.plan_id">
                     <q-item
                       clickable
                       v-ripple
@@ -1229,12 +1517,17 @@ const refreshPlanData = async () => {
                     </q-item>
                   </template>
                 </q-list>
+                <!-- Pagination controls -->
+                <div v-if="planTotalPages > 1" class="row items-center justify-center q-py-xs q-gutter-x-xs bg-grey-1" style="border-top: 1px solid #e0e0e0;">
+                  <q-btn flat dense round icon="chevron_left" size="xs" color="blue-9" :disable="planPage <= 1" @click="planPage--" />
+                  <span class="text-caption text-grey-8">{{ planPage }} / {{ planTotalPages }}</span>
+                  <q-btn flat dense round icon="chevron_right" size="xs" color="blue-9" :disable="planPage >= planTotalPages" @click="planPage++" />
+                </div>
               </template>
               <div v-else class="text-center q-pa-md text-grey">
                 <q-icon name="inbox" size="lg" class="q-mb-sm" /><br>
                 No active production plans matching selection
               </div>
-            </q-scroll-area>
           </div>
         </q-card>
 
@@ -1311,7 +1604,7 @@ const refreshPlanData = async () => {
                         </tr>
                     </thead>
                     <tbody>
-                        <template v-for="ing in selectableIngredients" :key="ing.re_code">
+                        <template v-for="ing in paginatedIngredients" :key="ing.re_code">
                             <tr 
                                 class="transition-all"
                                 :class="getIngredientRowClass(ing)"
@@ -1488,6 +1781,14 @@ const refreshPlanData = async () => {
                         </tr>
                     </tbody>
                 </q-markup-table>
+                <!-- Ingredient pagination -->
+                <div v-if="selectableIngredients.length > ingredientPerPage" class="row items-center justify-end q-px-sm q-py-xs bg-grey-2" style="font-size: 0.75rem;">
+                    <span class="text-grey-7 q-mr-sm">
+                        {{ (ingredientPage - 1) * ingredientPerPage + 1 }}-{{ Math.min(ingredientPage * ingredientPerPage, selectableIngredients.length) }} of {{ selectableIngredients.length }}
+                    </span>
+                    <q-btn flat round dense icon="chevron_left" size="xs" :disable="ingredientPage <= 1" @click="ingredientPage--" />
+                    <q-btn flat round dense icon="chevron_right" size="xs" :disable="ingredientPage >= ingredientTotalPages" @click="ingredientPage++" />
+                </div>
             </div>
         </q-card>
       </div>
@@ -1556,6 +1857,22 @@ const refreshPlanData = async () => {
                         readonly
                         style="width: 250px"
                     />
+                    <q-btn
+                        v-if="selectedBatch && filteredPreBatchLogs.length > 0"
+                        flat round dense
+                        icon="delete_sweep"
+                        color="red-8"
+                        size="sm"
+                        @click="$q.dialog({
+                            title: 'Clear All Records',
+                            message: `Delete all ${filteredPreBatchLogs.length} records for batch ${selectedBatch.batch_id}? This will restore inventory.`,
+                            cancel: true,
+                            persistent: true,
+                            color: 'red'
+                        }).onOk(() => clearAllBatchRecords(selectedBatch.batch_id))"
+                    >
+                        <q-tooltip>Clear all preBatch records for this batch</q-tooltip>
+                    </q-btn>
                 </div>
 
                 <q-space />
@@ -1762,17 +2079,19 @@ const refreshPlanData = async () => {
                         </q-select>
                     </div>
 
-                    <!-- Next Package No -->
+                    <!-- Package No / Total -->
                     <div class="col-12 col-md-2">
                         <div class="text-subtitle2 q-mb-xs text-no-wrap">{{ t('preBatch.nextPkgNo') }}</div>
                         <q-input
                             outlined
-                            :model-value="nextPackageNo"
+                            :model-value="`${nextPackageNo} / ${requestBatch}`"
                             dense
                             bg-color="yellow-1"
                             readonly
                             input-class="text-center text-weight-bold"
-                        />
+                        >
+                            <q-tooltip>Package {{ nextPackageNo }} of {{ requestBatch }} ({{ packageSize }} kg each)</q-tooltip>
+                        </q-input>
                     </div>
                 </div>
 
@@ -1933,111 +2252,7 @@ const refreshPlanData = async () => {
            </q-card-section>
         </q-card>
 
-        <!-- PreBatch List (Filtered by selected batch) -->
-        <q-card bordered flat class="bg-white">
-            <q-card-section class="q-py-xs bg-blue-grey-1 text-blue-grey-9 row items-center no-wrap">
-                <q-icon name="list_alt" size="xs" class="q-mr-xs" />
-                <div class="text-subtitle2 text-weight-bold">{{ t('preBatch.preBatchList') }}</div>
-                <q-space />
-                
-                
-                <!-- Delete Confirmation Scanner Input -->
-                <q-input 
-                    v-if="recordToDelete"
-                    v-model="deleteInput"
-                    outlined
-                    dense
-                    placeholder=""
-                    @keyup.enter="onDeleteScanEnter"
-                    class="q-ml-sm"
-                    style="min-width: 250px;"
-                >
-                    <template v-slot:prepend>
-                        <q-icon name="circle" color="positive" />
-                    </template>
-                </q-input>
-            </q-card-section>
-            
-            <q-card-section class="q-pa-none">
-                <q-table
-                    :rows="filteredPreBatchLogs"
-                    :columns="prebatchColumns"
-                    row-key="id"
-                    dense
-                    flat
-                    square
-                    separator="cell"
-                    :pagination="{ rowsPerPage: 10 }"
-                    selection="multiple"
-                    v-model:selected="selectedPreBatchLogs"
-                    style="max-height: 250px"
-                    class="sticky-header-table"
-                >
-                    <template v-slot:top-right>
-                        <q-btn
-                            v-if="selectedPreBatchLogs.length > 0"
-                            :label="t('preBatch.printPackingBoxLabel')"
-                            color="green-7"
-                            icon="inventory_2"
-                            dense
-                            no-caps
-                            unelevated
-                            class="q-px-sm"
-                            @click="showPackingBoxLabelDialog = true"
-                        />
-                    </template>
-                    <template v-slot:body-cell-reprint="props">
-                        <q-td :props="props" class="text-center">
-                            <q-btn 
-                                icon="print" 
-                                color="primary" 
-                                flat 
-                                round 
-                                dense 
-                                size="sm" 
-                                @click.stop="onReprintLabel(props.row)"
-                            >
-                                <q-tooltip>{{ t('preBatch.reprintLabel') }}</q-tooltip>
-                            </q-btn>
-                        </q-td>
-                    </template>
-                    <template v-slot:body-cell-actions="props">
-                        <q-td :props="props" class="text-center">
-                            <q-btn 
-                                icon="delete" 
-                                color="negative" 
-                                flat 
-                                round 
-                                dense 
-                                size="sm" 
-                                @click.stop="onDeleteRecord(props.row)"
-                            >
-                                <q-tooltip>{{ t('preBatch.cancelReturnInv') }}</q-tooltip>
-                            </q-btn>
-                        </q-td>
-                    </template>
-                    <template v-slot:bottom-row>
-                        <q-tr class="bg-blue-grey-1 text-weight-bold">
-                            <q-td colspan="2" class="text-right text-uppercase text-caption">{{ t('preBatch.summary') }}</q-td>
-                            <q-td class="text-center">{{ preBatchSummary.count }} / {{ preBatchSummary.targetCount }}</q-td>
-                            <q-td class="text-right">
-                                {{ preBatchSummary.totalNetWeight }} / {{ preBatchSummary.targetWeight }}
-                                <div class="text-caption" :class="preBatchSummary.errorColor">
-                                    {{ t('preBatch.error') }} {{ preBatchSummary.errorVolume }}
-                                </div>
-                            </q-td>
-                            <q-td></q-td>
-                        </q-tr>
-                    </template>
-                    <template v-slot:no-data>
-                        <div class="full-width row flex-center q-pa-md text-grey" style="font-size: 0.8rem;">
-                            <span v-if="!selectedBatch">{{ t('preBatch.selectBatchRecords') }}</span>
-                            <span v-else>{{ t('preBatch.noRecordsForBatch') }}</span>
-                        </div>
-                    </template>
-                </q-table>
-            </q-card-section>
-        </q-card>
+
       </div>
     </div>
 
@@ -2082,6 +2297,235 @@ const refreshPlanData = async () => {
                     unelevated 
                     :disable="!deleteInput"
                     @click="onConfirmDeleteManual" 
+                />
+            </q-card-actions>
+        </q-card>
+    </q-dialog>
+
+    <!-- Container Setup Dialog (after scan, before weighing) -->
+    <q-dialog v-model="showContainerSetupDialog" persistent>
+        <q-card style="min-width: 440px; max-width: 540px;">
+            <q-card-section class="bg-indigo-9 text-white">
+                <div class="row items-center no-wrap">
+                    <q-icon name="inventory_2" size="md" class="q-mr-sm" />
+                    <div>
+                        <div class="text-h6" style="line-height: 1.2;">Container Setup</div>
+                        <div v-if="selectedPlanDetails" class="text-caption" style="opacity: 0.85;">
+                            {{ selectedPlanDetails.sku_id }} — {{ selectedPlanDetails.sku_name || '' }}
+                        </div>
+                    </div>
+                    <q-space />
+                    <q-btn flat round dense icon="close" color="white" @click="showContainerSetupDialog = false" />
+                </div>
+            </q-card-section>
+
+            <q-card-section class="q-pa-lg">
+                <!-- Scanned Info -->
+                <div class="q-pa-sm bg-green-1 rounded-borders q-mb-md" style="border-left: 4px solid #4caf50;">
+                    <div class="row items-center q-mb-xs">
+                        <q-icon name="check_circle" color="green" size="xs" class="q-mr-xs" />
+                        <span class="text-caption text-weight-bold text-green-9">Scan Validated (FIFO OK)</span>
+                    </div>
+                    <div class="text-body2 text-weight-bold">{{ setupMatchedIngredient }}</div>
+                    <div class="text-caption text-grey-7">
+                        Lot: {{ setupMatchedLot }} | Batch: {{ setupPendingItem?.batch_id || '-' }}
+                    </div>
+                </div>
+
+                <!-- Request Volume -->
+                <div class="row items-center q-mb-md">
+                    <div class="col-5 text-subtitle2 text-grey-8">Request Volume:</div>
+                    <div class="col-7">
+                        <q-input outlined dense readonly :model-value="requireVolume.toFixed(4)" bg-color="grey-2" input-class="text-right text-weight-bold" suffix="kg" />
+                    </div>
+                </div>
+
+                <!-- Container Size Select -->
+                <div class="row items-center q-mb-md">
+                    <div class="col-5 text-subtitle2 text-grey-8">Container Size:</div>
+                    <div class="col-7">
+                        <q-select
+                            outlined
+                            v-model="setupContainerSize"
+                            :options="containerSizeOptions"
+                            dense
+                            bg-color="white"
+                            input-class="text-right text-weight-bold"
+                            use-input
+                            fill-input
+                            hide-selected
+                            suffix="kg"
+                            @filter="(val, update) => update(() => {})"
+                            @new-value="(val, done) => { const n = Number(val); if (!isNaN(n) && n > 0) done(n, 'add-unique'); else done() }"
+                        />
+                    </div>
+                </div>
+
+                <q-separator class="q-my-md" />
+
+                <!-- Calculated Packages -->
+                <div class="row items-center q-mb-sm">
+                    <div class="col-5 text-subtitle2 text-grey-8">Number of Packages:</div>
+                    <div class="col-7">
+                        <div class="text-h4 text-weight-bolder text-center" :class="setupCalcPackages > 0 ? 'text-indigo-9' : 'text-grey-5'">
+                            {{ setupCalcPackages || '-' }}
+                        </div>
+                    </div>
+                </div>
+                <div v-if="setupCalcPackages > 0" class="text-caption text-grey-6 text-center q-mt-xs">
+                    {{ setupCalcPackages }} × {{ setupContainerSize }} kg
+                    <span v-if="requireVolume % setupContainerSize !== 0">
+                        (last pkg: {{ (requireVolume % setupContainerSize).toFixed(4) }} kg)
+                    </span>
+                </div>
+
+                <q-separator class="q-my-md" />
+
+                <!-- Scale Selector -->
+                <div class="text-subtitle2 text-weight-bold text-grey-8 q-mb-sm">Select Scale:</div>
+                <div class="row q-gutter-sm q-mb-sm">
+                    <q-btn
+                        v-for="scale in scales" :key="scale.id"
+                        :outline="setupSelectedScale !== scale.id"
+                        :unelevated="setupSelectedScale === scale.id"
+                        :color="setupSelectedScale === scale.id ? 'indigo-9' : 'grey-5'"
+                        :text-color="setupSelectedScale === scale.id ? 'white' : 'grey-8'"
+                        :label="scale.label.split('(')[0].trim()"
+                        :disable="scale.isError"
+                        class="col text-weight-bold"
+                        style="font-size: 0.75rem;"
+                        @click="setupSelectedScale = scale.id"
+                    >
+                        <q-tooltip>{{ scale.label }}</q-tooltip>
+                    </q-btn>
+                </div>
+                <div class="text-caption text-green-9 text-weight-bold text-center">
+                    ✅ Auto-selected for {{ setupContainerSize }} kg
+                </div>
+            </q-card-section>
+
+            <q-card-actions class="q-px-lg q-pb-lg" align="right">
+                <q-btn flat label="Cancel" color="grey-7" @click="showContainerSetupDialog = false" />
+                <q-btn 
+                    unelevated 
+                    label="Confirm & Start Weighing" 
+                    icon="scale" 
+                    color="indigo-9" 
+                    :disable="setupCalcPackages <= 0"
+                    @click="confirmContainerSetup"
+                />
+            </q-card-actions>
+        </q-card>
+    </q-dialog>
+
+    <!-- Tare Reminder Popup (Step 3, scale at zero) -->
+    <q-dialog v-model="showTarePopup" persistent>
+        <q-card style="min-width: 420px; max-width: 500px;">
+            <q-card-section class="bg-amber-9 text-white">
+                <div class="row items-center no-wrap">
+                    <q-icon name="scale" size="md" class="q-mr-sm" />
+                    <div>
+                        <div class="text-h6" style="line-height: 1.2;">⚖️ Tare Scale</div>
+                        <div class="text-caption" style="opacity: 0.85;">Place container on scale and tare before weighing</div>
+                    </div>
+                </div>
+            </q-card-section>
+
+            <q-card-section class="q-py-md">
+                <!-- Scale selector -->
+                <div class="text-subtitle2 text-weight-bold text-grey-8 q-mb-sm">Select Scale:</div>
+                <div class="row q-gutter-sm">
+                    <q-btn
+                        v-for="scale in scales" :key="scale.id"
+                        :outline="selectedTareScale !== scale.id"
+                        :unelevated="selectedTareScale === scale.id"
+                        :color="selectedTareScale === scale.id ? 'amber-9' : 'grey-5'"
+                        :text-color="selectedTareScale === scale.id ? 'white' : 'grey-8'"
+                        :label="scale.label.split('(')[0].trim()"
+                        :disable="scale.isError"
+                        class="col text-weight-bold"
+                        style="font-size: 0.8rem;"
+                        @click="selectedTareScale = scale.id"
+                    >
+                        <q-tooltip>{{ scale.label }}</q-tooltip>
+                    </q-btn>
+                </div>
+                <div class="text-caption text-green-9 text-weight-bold q-mt-sm text-center">
+                    ✅ Recommended for {{ packageSize.toFixed(1) }} kg package
+                </div>
+            </q-card-section>
+
+            <q-card-section class="text-center q-pt-none q-pb-md">
+                <div class="text-h5 text-weight-bolder text-amber-10 q-mb-sm">
+                    ⚖️ Press TARE on Scale
+                </div>
+                <div class="text-body2 text-grey-7">
+                    Place your container on the scale, then press the <b>TARE</b> button on the scale to zero it out.
+                </div>
+                <div class="text-caption text-grey-5 q-mt-xs">Auto-closing in 5 seconds...</div>
+            </q-card-section>
+
+            <q-card-actions class="q-px-lg q-pb-lg row q-gutter-sm" align="center">
+                <q-btn
+                    unelevated
+                    label="TARE"
+                    icon="restart_alt"
+                    color="amber-9"
+                    class="col text-weight-bold"
+                    style="font-size: 1rem;"
+                    @click="handleTareAndAdvance"
+                />
+                <q-btn
+                    outline
+                    label="SKIP"
+                    icon="skip_next"
+                    color="grey-7"
+                    class="col text-weight-bold"
+                    style="font-size: 1rem;"
+                    @click="closeTarePopupAndAdvance"
+                />
+            </q-card-actions>
+        </q-card>
+    </q-dialog>
+
+    <!-- FIFO Violation Dialog -->
+    <q-dialog v-model="showFifoViolationDialog" persistent>
+        <q-card style="min-width: 420px; max-width: 500px;">
+            <q-card-section class="bg-red-9 text-white">
+                <div class="row items-center no-wrap">
+                    <q-icon name="warning" size="lg" class="q-mr-sm" />
+                    <div>
+                        <div class="text-h6 text-weight-bolder" style="line-height: 1.2;">FIFO Violation!</div>
+                        <div class="text-caption" style="opacity: 0.85;">Wrong lot scanned — must use earliest expire date first</div>
+                    </div>
+                </div>
+            </q-card-section>
+
+            <q-card-section class="q-pa-lg">
+                <!-- Scanned (Wrong) -->
+                <div class="q-pa-sm bg-red-1 rounded-borders q-mb-md" style="border-left: 4px solid #f44336;">
+                    <div class="text-caption text-weight-bold text-red-9 q-mb-xs">❌ You Scanned:</div>
+                    <div class="text-body1 text-weight-bold">{{ fifoViolationScannedLot }}</div>
+                    <div class="text-caption text-grey-7">Expire: {{ fifoViolationScannedExpiry }}</div>
+                </div>
+
+                <!-- Expected (Correct) -->
+                <div class="q-pa-sm bg-green-1 rounded-borders" style="border-left: 4px solid #4caf50;">
+                    <div class="text-caption text-weight-bold text-green-9 q-mb-xs">✅ Please Use This Lot Instead:</div>
+                    <div class="text-body1 text-weight-bold text-green-10">{{ fifoViolationExpectedLot }}</div>
+                    <div class="text-caption text-grey-7">Expire: {{ fifoViolationExpectedExpiry }}</div>
+                </div>
+            </q-card-section>
+
+            <q-card-actions class="q-px-lg q-pb-lg" align="center">
+                <q-btn 
+                    unelevated 
+                    label="OK, Scan Again" 
+                    icon="qr_code_scanner" 
+                    color="red-9" 
+                    class="full-width text-weight-bold"
+                    style="font-size: 1rem;"
+                    @click="showFifoViolationDialog = false"
                 />
             </q-card-actions>
         </q-card>
@@ -2162,6 +2606,7 @@ const refreshPlanData = async () => {
                     <q-icon name="arrow_right" size="xs" /> {{ currentPackageOrigins.length > 0 ? 'Scan Next Lot (multi-lot)' : 'Scan Intake Lot Label' }}
                 </div>
                 <q-input
+                    ref="dialogScanInputRef"
                     v-model="scanLotInput"
                     outlined
                     dense
@@ -2204,7 +2649,7 @@ const refreshPlanData = async () => {
                     </div>
                     <q-list dense separator>
                         <q-item
-                            v-for="(item, idx) in group.items"
+                            v-for="(item, idx) in getPaginatedScanItems(group.plan_id, group.items)"
                             :key="item.batch_id"
                             :clickable="item.status !== 2 && scanLotValidated"
                             :class="[
@@ -2242,6 +2687,12 @@ const refreshPlanData = async () => {
                             </q-item-section>
                         </q-item>
                     </q-list>
+                    <!-- Batch pagination controls -->
+                    <div v-if="getScanDialogTotalPages(group.items) > 1" class="row items-center justify-center q-py-xs q-gutter-x-xs bg-grey-1" style="border-top: 1px solid #e0e0e0;">
+                      <q-btn flat dense round icon="chevron_left" size="xs" color="blue-9" :disable="getScanDialogPage(group.plan_id) <= 1" @click="setScanDialogPage(group.plan_id, getScanDialogPage(group.plan_id) - 1)" />
+                      <span class="text-caption text-grey-8">{{ getScanDialogPage(group.plan_id) }} / {{ getScanDialogTotalPages(group.items) }}</span>
+                      <q-btn flat dense round icon="chevron_right" size="xs" color="blue-9" :disable="getScanDialogPage(group.plan_id) >= getScanDialogTotalPages(group.items)" @click="setScanDialogPage(group.plan_id, getScanDialogPage(group.plan_id) + 1)" />
+                    </div>
                 </div>
             </q-card-section>
 

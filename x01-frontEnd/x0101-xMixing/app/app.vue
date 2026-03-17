@@ -52,6 +52,7 @@ const handleLogout = async () => {
   })
   navigateTo('/')
 }
+
 </script>
 
 <template>

@@ -146,7 +146,7 @@ export function usePreBatchLabels(deps: LabelDeps) {
             totalVol: deps.requireVolume.value,
             pkgNo,
             totalPkgs,
-            qrCode: JSON.stringify({b:deps.selectedBatch.value.batch_id, m:ing?.mat_sap_code||'', p:`${pkgNo}/${totalPkgs}`, n:capturedScaleValue.value, t:deps.requireVolume.value}),
+            qrCode: JSON.stringify({ b: deps.selectedBatch.value.batch_id, m: ing?.mat_sap_code || '', p: `${pkgNo}/${totalPkgs}`, n: capturedScaleValue.value, t: deps.requireVolume.value }),
             timestamp: formatDate(new Date().toISOString()),
             origins: deps.currentPackageOrigins.value.length > 0 ? deps.currentPackageOrigins.value : undefined,
         })
@@ -288,10 +288,21 @@ export function usePreBatchLabels(deps: LabelDeps) {
     }
 
     const onReprintLabel = async (record: any) => {
-        if (!record || !deps.selectedBatch.value) return
+        if (!record) return
         try {
+            // Derive batch info from record — don't require selectedBatch
+            const batch = deps.selectedBatch.value || (() => {
+                // Extract batch_id from batch_record_id (e.g. "P260316-01-03-001-FV052A-1" → "P260316-01-03-001")
+                const parts = (record.batch_record_id || '').split('-')
+                const batchId = parts.slice(0, 7).join('-')
+                return {
+                    batch_id: batchId,
+                    sku_id: deps.selectedPlanDetails.value?.sku_id || record.sku_id || '-',
+                    plan_id: record.plan_id || deps.selectedProductionPlan.value
+                }
+            })()
             const data = buildLabelData({
-                batch: deps.selectedBatch.value,
+                batch,
                 planId: record.plan_id || deps.selectedProductionPlan.value,
                 plan: deps.selectedPlanDetails.value,
                 reCode: record.re_code,
@@ -299,9 +310,10 @@ export function usePreBatchLabels(deps: LabelDeps) {
                 matSapCode: record.mat_sap_code || '-',
                 containerType: record.package_container_type || (deps.selectableIngredients.value.find((i: any) => i.re_code === record.re_code)?.package_container_type) || 'Bag',
                 netVol: Number(record.net_volume),
-                totalVol: Number(record.total_volume),
+                totalVol: Number(record.total_volume || record.total_request_volume || deps.requireVolume.value || 0),
                 pkgNo: record.package_no,
-                qrCode: JSON.stringify({b:deps.selectedBatch.value.batch_id, m:record.mat_sap_code||'', p:`${record.package_no}/${record.total_packages||1}`, n:Number(record.net_volume), t:Number(record.total_volume||record.total_request_volume||0)}),
+                totalPkgs: record.total_packages || 1,
+                qrCode: JSON.stringify({ b: batch.batch_id, m: record.mat_sap_code || '', p: `${record.package_no}/${record.total_packages || 1}`, n: Number(record.net_volume), t: Number(record.total_volume || record.total_request_volume || 0) }),
                 timestamp: new Date(record.created_at || Date.now()).toLocaleString('en-GB'),
                 origins: record.origins?.length > 0 ? record.origins : undefined,
                 fallbackLotId: record.intake_lot_id,
@@ -390,7 +402,7 @@ export function usePreBatchLabels(deps: LabelDeps) {
                     totalVol: Number(record.total_volume),
                     pkgNo: record.package_no,
                     totalPkgs: record.total_packages || 1,
-                    qrCode: JSON.stringify({b:batchId, m:record.mat_sap_code||'', p:`${record.package_no}/${record.total_packages||1}`, n:Number(record.net_volume), t:Number(record.total_volume||record.total_request_volume||0)}),
+                    qrCode: JSON.stringify({ b: batchId, m: record.mat_sap_code || '', p: `${record.package_no}/${record.total_packages || 1}`, n: Number(record.net_volume), t: Number(record.total_volume || record.total_request_volume || 0) }),
                     timestamp: new Date(record.created_at || Date.now()).toLocaleString('en-GB'),
                     origins: record.origins?.length > 0 ? record.origins : undefined,
                     fallbackLotId: record.intake_lot_id,
@@ -456,7 +468,7 @@ export function usePreBatchLabels(deps: LabelDeps) {
                     totalVol: Number(record.total_volume),
                     pkgNo: record.package_no,
                     totalPkgs: record.total_packages || 1,
-                    qrCode: JSON.stringify({b:batchId, m:record.mat_sap_code||'', p:`${record.package_no}/${record.total_packages||1}`, n:Number(record.net_volume), t:Number(record.total_volume||record.total_request_volume||0)}),
+                    qrCode: JSON.stringify({ b: batchId, m: record.mat_sap_code || '', p: `${record.package_no}/${record.total_packages || 1}`, n: Number(record.net_volume), t: Number(record.total_volume || record.total_request_volume || 0) }),
                     timestamp: new Date(record.created_at || Date.now()).toLocaleString('en-GB'),
                     origins: record.origins?.length > 0 ? record.origins : undefined,
                     fallbackLotId: record.intake_lot_id,
@@ -503,7 +515,7 @@ export function usePreBatchLabels(deps: LabelDeps) {
                     totalVol: requiredVolume,
                     pkgNo: pkg.pkg_no,
                     totalPkgs: packages.length,
-                    qrCode: JSON.stringify({b:batchId, m:ing?.mat_sap_code||'', p:`${pkg.pkg_no}/${packages.length}`, n:volume, t:requiredVolume}),
+                    qrCode: JSON.stringify({ b: batchId, m: ing?.mat_sap_code || '', p: `${pkg.pkg_no}/${packages.length}`, n: volume, t: requiredVolume }),
                     timestamp: pkg.log ? new Date(pkg.log.created_at || Date.now()).toLocaleString('en-GB') : new Date().toLocaleString('en-GB'),
                     origins: pkg.log?.origins?.length > 0 ? pkg.log.origins : undefined,
                     fallbackLotId: pkg.log?.intake_lot_id,

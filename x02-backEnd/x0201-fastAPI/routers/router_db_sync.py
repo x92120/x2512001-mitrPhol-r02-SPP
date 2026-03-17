@@ -1,16 +1,12 @@
 """
 Database Sync Router
 ====================
-Provides endpoints to sync data between Cloud DB and Remote DB,
-and to switch the active database connection at runtime.
+Provides endpoints to sync data between Remote DB and Cloud DB (backup only).
 
 Endpoints:
-  POST /db-sync/cloud-to-remote  → Sync Cloud DB → Remote DB
-  POST /db-sync/remote-to-cloud  → Sync Remote DB → Cloud DB
-  GET  /db-sync/status           → Get connection status of both DBs
+  POST /db-sync/remote-to-cloud  → Sync Remote DB → Cloud DB (backup)
+  GET  /db-sync/status           → Get connection status
   GET  /db-sync/active-db        → Get the currently active database
-  POST /db-sync/active-db        → Switch the active database
-  GET  /db-sync/db-options       → List available database options
 """
 
 import pymysql
@@ -18,11 +14,7 @@ import re
 import logging
 import os
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
-from typing import Optional
-from database import (
-    DB_CONFIGS, get_active_db_info, set_active_db as _set_active_db
-)
+from database import get_active_db_info
 
 logger = logging.getLogger(__name__)
 
@@ -35,12 +27,6 @@ DB_PORT = int(os.getenv("DB_PORT", "3306"))
 DB_NAME = os.getenv("DB_NAME", "xMixingControl")
 CLOUD_HOST = os.getenv("CLOUD_DB", "152.42.166.150")
 REMOTE_HOST = os.getenv("REMOTE_DB", "192.168.121.11")
-
-
-# ── Request Models ──
-
-class SwitchDbRequest(BaseModel):
-    key: str  # "cloudDB" or "remoteDB"
 
 
 def get_db_config(host: str) -> dict:
@@ -162,7 +148,7 @@ def sync_database(source_host: str, target_host: str, source_label: str, target_
 
 
 # =============================================================================
-# ACTIVE DATABASE ENDPOINTS
+# ACTIVE DATABASE ENDPOINT
 # =============================================================================
 
 @router.get("/active-db")
@@ -171,30 +157,11 @@ def get_active_db():
     return get_active_db_info()
 
 
-@router.post("/active-db")
-def switch_active_db(body: SwitchDbRequest):
-    """Switch the active database. key must be 'cloudDB' or 'remoteDB'."""
-    try:
-        result = _set_active_db(body.key)
-        return {"status": "ok", **result}
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-
 @router.get("/db-options")
 def get_db_options():
-    """List all available database options."""
+    """List available database option (Remote DB only)."""
     active = get_active_db_info()
-    options = []
-    for key, cfg in DB_CONFIGS.items():
-        options.append({
-            "key": key,
-            "label": cfg["label"],
-            "host": cfg["host"],
-            "icon": cfg["icon"],
-            "active": key == active["key"],
-        })
-    return options
+    return [active]
 
 
 # =============================================================================
@@ -203,37 +170,25 @@ def get_db_options():
 
 @router.get("/status")
 def get_sync_status():
-    """Check connection status of both Cloud and Remote databases."""
+    """Check connection status of the Remote database."""
     result = {
-        "cloud": {"host": CLOUD_HOST, "status": "unknown", "tables": 0},
         "remote": {"host": REMOTE_HOST, "status": "unknown", "tables": 0},
     }
-
-    for key, host in [("cloud", CLOUD_HOST), ("remote", REMOTE_HOST)]:
-        try:
-            conn = pymysql.connect(**get_db_config(host))
-            cur = conn.cursor()
-            cur.execute("SHOW TABLES")
-            result[key]["tables"] = len(cur.fetchall())
-            result[key]["status"] = "connected"
-            cur.close()
-            conn.close()
-        except Exception as e:
-            result[key]["status"] = f"error: {str(e)}"
-
+    try:
+        conn = pymysql.connect(**get_db_config(REMOTE_HOST))
+        cur = conn.cursor()
+        cur.execute("SHOW TABLES")
+        result["remote"]["tables"] = len(cur.fetchall())
+        result["remote"]["status"] = "connected"
+        cur.close()
+        conn.close()
+    except Exception as e:
+        result["remote"]["status"] = f"error: {str(e)}"
     return result
-
-
-@router.post("/cloud-to-remote")
-def sync_cloud_to_remote():
-    """Sync all data from Cloud DB to Remote DB."""
-    logger.info("Starting sync: Cloud → Remote")
-    return sync_database(CLOUD_HOST, REMOTE_HOST, "Cloud", "Remote")
 
 
 @router.post("/remote-to-cloud")
 def sync_remote_to_cloud():
-    """Sync all data from Remote DB to Cloud DB."""
+    """Sync all data from Remote DB to Cloud DB (backup)."""
     logger.info("Starting sync: Remote → Cloud")
     return sync_database(REMOTE_HOST, CLOUD_HOST, "Remote", "Cloud")
-

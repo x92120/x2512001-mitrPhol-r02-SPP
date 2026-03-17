@@ -6,8 +6,13 @@ import { appConfig } from '~/appConfig/config'
  * useI18n Composable
  */
 export const useI18n = () => {
-    // Shared state using Nuxt useCookie for SSR-safe persistence
-    const locale = useCookie<Locale>('app_locale', { default: () => 'en', watch: true })
+    // Use useState for instant reactivity (no cookie write delay)
+    const locale = useState<Locale>('app_locale', () => {
+        if (import.meta.client) {
+            return (localStorage.getItem('app_locale') as Locale) || 'en'
+        }
+        return 'en'
+    })
 
     // Dictionary state - using useState to share across components and sync SSR/Client
     const liveDictionary = useState<Record<string, Record<string, string>>>('i18n_dictionary', () => ({}))
@@ -50,10 +55,12 @@ export const useI18n = () => {
 
     const toggleLocale = () => {
         locale.value = locale.value === 'en' ? 'th' : 'en'
+        if (import.meta.client) localStorage.setItem('app_locale', locale.value)
     }
 
     const setLocale = (newLocale: Locale) => {
         locale.value = newLocale
+        if (import.meta.client) localStorage.setItem('app_locale', newLocale)
     }
 
     const reloadTranslations = () => fetchTranslations()

@@ -5,6 +5,25 @@ import { ref, computed, watch, nextTick } from 'vue'
 import { appConfig } from '~/appConfig/config'
 import type { QTableColumn } from 'quasar'
 
+/** Parse date safely — handles DD/MM/YYYY, YYYY-MM-DD, ISO, and Date objects */
+const parseDateSafe = (date: any): Date | null => {
+    if (!date) return null
+    if (date instanceof Date) return isNaN(date.getTime()) ? null : date
+    const s = String(date).trim()
+    const slashMatch = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/)
+    if (slashMatch) {
+        const [, day, month, year] = slashMatch
+        return new Date(Number(year), Number(month) - 1, Number(day))
+    }
+    const dashDMY = s.match(/^(\d{1,2})-(\d{1,2})-(\d{4})$/)
+    if (dashDMY) {
+        const [, day, month, year] = dashDMY
+        return new Date(Number(year), Number(month) - 1, Number(day))
+    }
+    const d = new Date(s)
+    return isNaN(d.getTime()) ? null : d
+}
+
 export interface InventoryItem {
     id: number
     intake_lot_id: string
@@ -21,6 +40,7 @@ export interface InventoryItem {
     material_description?: string
     uom?: string
     status: string
+    intake_at?: string
 }
 
 export interface InventoryDeps {
@@ -136,10 +156,7 @@ export function usePreBatchInventory(deps: InventoryDeps) {
 
     // --- Computed ---
     const inventoryColumns = computed<QTableColumn[]>(() => [
-        { name: 'id', align: 'center', label: t('common.id'), field: 'id', sortable: true },
         { name: 'intake_lot_id', align: 'left', label: t('preBatch.intakeLotId'), field: 'intake_lot_id', sortable: true },
-        { name: 'warehouse_location', align: 'center', label: t('preBatch.fromWarehouse'), field: 'warehouse_location' },
-        { name: 'lot_id', align: 'left', label: t('ingredient.lotId'), field: 'lot_id' },
         { name: 'mat_sap_code', align: 'left', label: t('ingredient.matSapCode'), field: 'mat_sap_code' },
         { name: 're_code', align: 'center', label: t('ingredient.reCode'), field: 're_code' },
         { name: 'material_description', align: 'left', label: t('common.description'), field: 'material_description' },
@@ -149,7 +166,6 @@ export function usePreBatchInventory(deps: InventoryDeps) {
         { name: 'intake_package_vol', align: 'right', label: t('ingredient.pkgVol'), field: 'intake_package_vol' },
         { name: 'package_intake', align: 'center', label: t('ingredient.pkgs'), field: 'package_intake' },
         { name: 'expire_date', align: 'center', label: t('ingredient.expiryDate'), field: 'expire_date', format: (val: any) => formatDate(val) },
-        { name: 'po_number', align: 'left', label: t('ingredient.poNo'), field: 'po_number' },
         { name: 'manufacturing_date', align: 'center', label: t('preBatch.mfgDate'), field: 'manufacturing_date', format: (val: any) => formatDate(val) },
         { name: 'status', align: 'center', label: t('common.status'), field: 'status' },
         { name: 'actions', align: 'center', label: t('common.actions'), field: 'id' }
@@ -165,9 +181,13 @@ export function usePreBatchInventory(deps: InventoryDeps) {
                 return reMatch && hasStock && statusOk
             })
             .sort((a, b) => {
-                const dateA = a.expire_date ? new Date(a.expire_date).getTime() : Infinity
-                const dateB = b.expire_date ? new Date(b.expire_date).getTime() : Infinity
+                const dateA = parseDateSafe(a.expire_date)?.getTime() ?? Infinity
+                const dateB = parseDateSafe(b.expire_date)?.getTime() ?? Infinity
                 if (dateA !== dateB) return dateA - dateB
+                // Same expire date → sort by intake_at (earlier intake first)
+                const intakeA = parseDateSafe(a.intake_at)?.getTime() ?? Infinity
+                const intakeB = parseDateSafe(b.intake_at)?.getTime() ?? Infinity
+                if (intakeA !== intakeB) return intakeA - intakeB
                 return (a.intake_lot_id || '').localeCompare(b.intake_lot_id || '')
             })
     })
@@ -179,8 +199,8 @@ export function usePreBatchInventory(deps: InventoryDeps) {
         const fifoItem = list[0]
         if (!fifoItem || !fifoItem.expire_date) return true
 
-        const dateItem = new Date(item.expire_date).getTime()
-        const dateFifo = new Date(fifoItem.expire_date).getTime()
+        const dateItem = parseDateSafe(item.expire_date)?.getTime() ?? Infinity
+        const dateFifo = parseDateSafe(fifoItem.expire_date)?.getTime() ?? Infinity
 
         // If the scanned item's expiry is the same as or earlier than the FIFO item's expiry, it's compliant.
         return dateItem <= dateFifo
@@ -190,9 +210,13 @@ export function usePreBatchInventory(deps: InventoryDeps) {
         return [...inventoryRows.value]
             .filter(i => i.remain_vol > 0 && i.status === 'Active')
             .sort((a, b) => {
-                const dateA = a.expire_date ? new Date(a.expire_date).getTime() : Infinity
-                const dateB = b.expire_date ? new Date(b.expire_date).getTime() : Infinity
-                return dateA - dateB
+                const dateA = parseDateSafe(a.expire_date)?.getTime() ?? Infinity
+                const dateB = parseDateSafe(b.expire_date)?.getTime() ?? Infinity
+                if (dateA !== dateB) return dateA - dateB
+                const intakeA = parseDateSafe(a.intake_at)?.getTime() ?? Infinity
+                const intakeB = parseDateSafe(b.intake_at)?.getTime() ?? Infinity
+                if (intakeA !== intakeB) return intakeA - intakeB
+                return (a.intake_lot_id || '').localeCompare(b.intake_lot_id || '')
             })
     })
 
