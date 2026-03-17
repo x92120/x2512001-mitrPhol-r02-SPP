@@ -393,6 +393,7 @@ const workflowStatus = computed(() => {
 // --- Tare Popup ---
 const showTarePopup = ref(false)
 const selectedTareScale = ref(0)
+const showConfirmStartPopup = ref(false)
 let tarePopupTimer: ReturnType<typeof setTimeout> | null = null
 
 // Parse capacity from scale label, e.g. "Scale 1 (10 Kg +/- 0.02kg)" -> 10
@@ -419,11 +420,8 @@ const autoSelectBestScale = () => {
 const openTarePopup = () => {
     autoSelectBestScale()
     showTarePopup.value = true
+    // No auto-advance timer — operator must tare, then confirm start popup appears when zero
     if (tarePopupTimer) clearTimeout(tarePopupTimer)
-    tarePopupTimer = setTimeout(() => {
-        showTarePopup.value = false
-        workflowStep.value = 4
-    }, 5000)
 }
 
 const closeTarePopupAndAdvance = () => {
@@ -431,7 +429,7 @@ const closeTarePopupAndAdvance = () => {
     showTarePopup.value = false
     // Apply the selected scale
     scalesComposable.selectedScale.value = selectedTareScale.value
-    workflowStep.value = 4
+    // Don't jump to step 4 — let watcher detect zero and show confirm start popup
 }
 
 const handleTareAndAdvance = () => {
@@ -440,6 +438,11 @@ const handleTareAndAdvance = () => {
         scalesComposable.onTare(selectedTareScale.value)
     }
     closeTarePopupAndAdvance()
+}
+
+const confirmStartWeighing = () => {
+    showConfirmStartPopup.value = false
+    workflowStep.value = 4
 }
 
 const handleDoneClick = async () => {
@@ -632,19 +635,23 @@ watch([workflowStep, actualScaleValue, selectedReCode, selectedIntakeLotId],
         workflowStep.value = 3
     }
     
-    // 3. At Step 3 and scale is at zero → show tare popup instead of auto-advancing
+    // 3. At Step 3: handle scale state
     if (step === 3 && re && lot) {
-        const zeroThreshold = (activeScale.value?.tolerance || 0.01) * 2
-        if (Math.abs(val) <= zeroThreshold) {
-            // Auto-select scale with weight before showing popup
-            const scaleWithWeight = scalesComposable.scales.value.find(
-                (s: any) => !s.isError && Math.abs(s.value) > 0.01
-            )
-            if (scaleWithWeight && scaleWithWeight.id !== scalesComposable.selectedScale.value) {
-                scalesComposable.selectedScale.value = scaleWithWeight.id
-            }
+        const isZero = Math.abs(val) <= 0.001
+        if (!isZero) {
+            // Scale NOT zero → show Tare popup so operator can tare
+            // Close confirm popup if it was open (scale went back to non-zero)
+            showConfirmStartPopup.value = false
             if (!showTarePopup.value) {
                 openTarePopup()
+            }
+        } else {
+            // Scale IS zero → close tare popup and show Confirm start popup
+            if (showTarePopup.value) {
+                showTarePopup.value = false
+            }
+            if (!showConfirmStartPopup.value) {
+                showConfirmStartPopup.value = true
             }
         }
     }
@@ -2581,7 +2588,7 @@ const refreshPlanData = async () => {
         </q-card>
     </q-dialog>
 
-    <!-- Tare Reminder Popup (Step 3, scale at zero) -->
+    <!-- Tare Popup (Step 3, scale NOT at zero) -->
     <q-dialog v-model="showTarePopup" persistent>
         <q-card style="min-width: 420px; max-width: 500px;">
             <q-card-section class="bg-amber-9 text-white">
@@ -2625,7 +2632,7 @@ const refreshPlanData = async () => {
                 <div class="text-body2 text-grey-7">
                     Place your container on the scale, then press the <b>TARE</b> button on the scale to zero it out.
                 </div>
-                <div class="text-caption text-grey-5 q-mt-xs">Auto-closing in 5 seconds...</div>
+                <div class="text-caption text-red-5 q-mt-xs text-weight-bold">⚠️ Scale is NOT zero — tare before weighing</div>
             </q-card-section>
 
             <q-card-actions class="q-px-lg q-pb-lg row q-gutter-sm" align="center">
@@ -2651,6 +2658,49 @@ const refreshPlanData = async () => {
         </q-card>
     </q-dialog>
 
+    <!-- Confirm Start Weighing Popup (Step 3, scale IS zero) -->
+    <q-dialog v-model="showConfirmStartPopup" persistent>
+        <q-card style="min-width: 400px; max-width: 480px;">
+            <q-card-section class="bg-green-8 text-white">
+                <div class="row items-center no-wrap">
+                    <q-icon name="check_circle" size="md" class="q-mr-sm" />
+                    <div>
+                        <div class="text-h6" style="line-height: 1.2;">✅ Scale Ready</div>
+                        <div class="text-caption" style="opacity: 0.85;">Scale reads 0.00 — ready to start weighing</div>
+                    </div>
+                </div>
+            </q-card-section>
+
+            <q-card-section class="text-center q-py-lg">
+                <div class="text-h5 text-weight-bolder text-green-9 q-mb-sm">
+                    Start Weighing?
+                </div>
+                <div class="text-body2 text-grey-7">
+                    Ingredient: <b>{{ selectedReCode }}</b><br/>
+                    Package: <b>{{ packageSize }} kg</b> — Remain: <b>{{ remainVolume.toFixed(2) }} kg</b>
+                </div>
+            </q-card-section>
+
+            <q-card-actions class="q-px-lg q-pb-lg row q-gutter-sm" align="center">
+                <q-btn
+                    unelevated
+                    label="START WEIGHING"
+                    icon="play_arrow"
+                    color="green-8"
+                    class="col text-weight-bold"
+                    style="font-size: 1.1rem;"
+                    @click="confirmStartWeighing"
+                />
+                <q-btn
+                    outline
+                    label="CANCEL"
+                    color="grey-7"
+                    class="col-4 text-weight-bold"
+                    @click="showConfirmStartPopup = false; workflowStep = 1"
+                />
+            </q-card-actions>
+        </q-card>
+    </q-dialog>
     <!-- FIFO Violation Dialog -->
     <q-dialog v-model="showFifoViolationDialog" persistent>
         <q-card style="min-width: 420px; max-width: 500px;">
