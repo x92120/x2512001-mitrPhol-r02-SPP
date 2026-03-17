@@ -863,6 +863,153 @@ const setupMatchedIngredient = ref('')
 const setupMatchedLot = ref('')
 const setupPendingItem = ref<any>(null)
 
+// --- Scan Full Lot Dialog ---
+const showScanFullLotDialog = ref(false)
+const scanFullLotPackageVol = ref(0)
+const scanFullLotInput = ref('')
+const scanFullLotScanned = ref<{ lot_id: string; volume: number; status: string; pkg_no: number }[]>([])
+const scanFullLotProcessing = ref(false)
+
+const scanFullLotCalc = computed(() => {
+  const required = remainVolume.value
+  const pkgVol = scanFullLotPackageVol.value
+  if (pkgVol <= 0 || required <= 0) return { fullPacks: 0, remainder: 0, totalFullVol: 0 }
+  const fullPacks = Math.floor(required / pkgVol)
+  const totalFullVol = fullPacks * pkgVol
+  const remainder = required - totalFullVol
+  return { fullPacks, remainder: Math.round(remainder * 10000) / 10000, totalFullVol }
+})
+
+const scanFullLotRemaining = computed(() => {
+  const scannedVol = scanFullLotScanned.value.reduce((s, o) => s + o.volume, 0)
+  return Math.max(0, scanFullLotCalc.value.totalFullVol - scannedVol)
+})
+
+const openScanFullLotDialog = () => {
+  scanFullLotPackageVol.value = packageSize.value || containerSize.value || 0
+  scanFullLotInput.value = ''
+  scanFullLotScanned.value = []
+  showScanFullLotDialog.value = true
+}
+
+const onScanFullLotEnter = async () => {
+  const lotId = scanFullLotInput.value.trim()
+  scanFullLotInput.value = ''
+  if (!lotId || scanFullLotProcessing.value) return
+
+  // Check if already scanned
+  if (scanFullLotScanned.value.some(s => s.lot_id === lotId)) {
+    $q.notify({ type: 'warning', message: `Lot ${lotId} already scanned`, position: 'top' })
+    return
+  }
+
+  // Check if enough full packs already scanned
+  if (scanFullLotScanned.value.length >= scanFullLotCalc.value.fullPacks) {
+    $q.notify({ type: 'warning', message: 'All full packs already scanned!', position: 'top' })
+    return
+  }
+
+  scanFullLotProcessing.value = true
+  try {
+    // Validate lot exists in inventory for this ingredient
+    const inv = inventoryRows.value.find((r: any) => 
+      r.intake_lot_id?.trim().toUpperCase() === lotId.toUpperCase() && 
+      r.re_code === selectedReCode.value
+    )
+    if (!inv) {
+      $q.notify({ type: 'negative', message: `Lot ${lotId} not found in inventory for ${selectedReCode.value}`, position: 'top' })
+      scanFullLotProcessing.value = false
+      return
+    }
+
+    const pkgVol = scanFullLotPackageVol.value
+    const pkgNo = (completedCount.value || 0) + scanFullLotScanned.value.length + 1
+    const totalPkgs = scanFullLotCalc.value.fullPacks + (scanFullLotCalc.value.remainder > 0 ? 1 : 0)
+    
+    // Build batch_record_id
+    const batchId = selectedBatch.value?.batch_id || ''
+    const batchRecordId = `${batchId}-${selectedReCode.value}-${pkgNo}`
+
+    // Save to API (pack item)
+    const reqItem = prebatchItems.value.find((it: any) => 
+      it.batch_id === batchId && it.re_code === selectedReCode.value
+    )
+    if (!reqItem) {
+      $q.notify({ type: 'negative', message: 'PreBatch item not found', position: 'top' })
+      scanFullLotProcessing.value = false
+      return
+    }
+
+    await $fetch(`${appConfig.apiBaseUrl}/prebatch-items/${reqItem.id}/pack`, {
+      method: 'PUT',
+      headers: authHeader() as Record<string, string>,
+      body: {
+        batch_record_id: batchRecordId,
+        package_no: pkgNo,
+        total_packages: totalPkgs,
+        net_volume: pkgVol,
+        intake_lot_id: lotId,
+        mat_sap_code: inv.mat_sap_code || '',
+        recode_batch_id: String(pkgNo),
+        origins: [{ intake_lot_id: lotId, mat_sap_code: inv.mat_sap_code || '', take_volume: pkgVol }],
+      }
+    })
+
+    scanFullLotScanned.value.push({ lot_id: lotId, volume: pkgVol, status: 'ok', pkg_no: pkgNo })
+
+    // Print label
+    try {
+      const ing = ingredients.value.find((i: any) => i.re_code === selectedReCode.value)
+      const labelData = buildLabelData({
+        batch: selectedBatch.value,
+        planId: selectedProductionPlan.value,
+        plan: selectedPlanDetails.value,
+        reCode: selectedReCode.value,
+        ingName: ing?.ingredient_name || ing?.name || selectedReCode.value,
+        matSapCode: inv.mat_sap_code || '-',
+        containerType: ing?.package_container_type || 'Bag',
+        netVol: pkgVol,
+        totalVol: requireVolume.value,
+        pkgNo: pkgNo,
+        totalPkgs: totalPkgs,
+        qrCode: JSON.stringify({ b: batchId, m: inv.mat_sap_code || '', p: `${pkgNo}/${totalPkgs}`, n: pkgVol, t: requireVolume.value }),
+        timestamp: new Date().toLocaleString('en-GB'),
+        origins: [{ intake_lot_id: lotId, mat_sap_code: inv.mat_sap_code || '', take_volume: pkgVol }],
+      })
+      const svgContent = await generateLabelSvg('prebatch-label_4x3', labelData)
+      if (svgContent) await printLabel(svgContent)
+    } catch (e) {
+      console.warn('Label print failed:', e)
+    }
+
+    // Refresh data
+    await fetchPreBatchRecords()
+    await fetchPrebatchItems(batchId)
+
+    $q.notify({ type: 'positive', message: `Pkg #${pkgNo}: ${lotId} — ${pkgVol} kg ✓`, position: 'top', timeout: 2000 })
+
+    // Auto-close when all full packs scanned
+    if (scanFullLotScanned.value.length >= scanFullLotCalc.value.fullPacks) {
+      setTimeout(() => {
+        showScanFullLotDialog.value = false
+        if (scanFullLotCalc.value.remainder > 0) {
+          $q.notify({ 
+            type: 'info', 
+            message: `All full lots scanned! Remaining ${scanFullLotCalc.value.remainder} kg — weigh on scale`,
+            position: 'top', timeout: 4000 
+          })
+        } else {
+          $q.notify({ type: 'positive', message: 'All packages complete!', position: 'top' })
+        }
+      }, 500)
+    }
+  } catch (err: any) {
+    console.error('Scan Full Lot error:', err)
+    $q.notify({ type: 'negative', message: err?.data?.detail || 'Failed to save package', position: 'top' })
+  }
+  scanFullLotProcessing.value = false
+}
+
 // --- Production plan pagination ---
 const planPage = ref(1)
 const planPerPage = 5
@@ -2099,7 +2246,7 @@ const refreshPlanData = async () => {
                 <div class="row q-col-gutter-md items-center justify-end q-pt-md">
                     
                     <!-- Stop Button -->
-                    <div class="col-12 col-md-4">
+                    <div class="col-6 col-md-3">
                         <q-btn
                             label="STOP"
                             color="red-10"
@@ -2114,9 +2261,25 @@ const refreshPlanData = async () => {
                         />
                     </div>
 
+                    <!-- SCAN FULL LOT Button (Step 3+) -->
+                    <div class="col-6 col-md-3">
+                        <q-btn
+                            label="SCAN FULL LOT"
+                            color="purple-9"
+                            text-color="white"
+                            icon="qr_code_scanner"
+                            class="full-width"
+                            style="height: 44px"
+                            unelevated
+                            @click="openScanFullLotDialog"
+                            :disable="workflowStep < 3 || !selectedReCode || !selectedBatch"
+                        >
+                            <q-tooltip>Scan full intake lots without weighing — uses exact package volume</q-tooltip>
+                        </q-btn>
+                    </div>
+
                     <!-- Step 3: Start PreBatch / Step 4: Next Lot -->
-                    <div class="col-12 col-md-4">
-                        <!-- NEXT LOT button (during weighing, has weight, not yet done) -->
+                    <div class="col-6 col-md-3">                        <!-- NEXT LOT button (during weighing, has weight, not yet done) -->
                         <q-btn
                             v-if="workflowStep === 4 && batchedVolume > 0.001 && !isPackagedVolumeInTol"
                             label="NEXT LOT"
@@ -2151,7 +2314,7 @@ const refreshPlanData = async () => {
                     </div>
 
                     <!-- Step 4 & 7: Done / Next Prep -->
-                    <div class="col-12 col-md-4">
+                    <div class="col-12 col-md-3">
                         <q-btn
                             :label="workflowStep === 7 ? 'NEXT PREP' : t('prodPlan.done')"
                             :color="(workflowStep === 7 || (workflowStep === 4 && isPackagedVolumeInTol)) ? 'green-9' : 'grey-4'"
@@ -3096,6 +3259,127 @@ const refreshPlanData = async () => {
         
         <q-card-actions align="right">
           <q-btn flat label="Close" color="primary" v-close-popup />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
+    <!-- Scan Full Lot Dialog -->
+    <q-dialog v-model="showScanFullLotDialog" persistent>
+      <q-card style="min-width: 520px; max-width: 650px;">
+        <q-card-section class="bg-purple-9 text-white">
+          <div class="row items-center no-wrap">
+            <q-icon name="qr_code_scanner" size="md" class="q-mr-sm" />
+            <div>
+              <div class="text-h6 text-weight-bold">SCAN FULL LOT</div>
+              <div class="text-caption">Scan full intake lots — use exact package volume without weighing</div>
+            </div>
+            <q-space />
+            <q-btn flat round icon="close" color="white" @click="showScanFullLotDialog = false" />
+          </div>
+        </q-card-section>
+
+        <q-card-section>
+          <!-- Ingredient & Batch Info -->
+          <div class="row q-col-gutter-sm q-mb-md">
+            <div class="col-6">
+              <q-input outlined dense readonly :model-value="selectedBatch?.batch_id || ''" label="Batch ID" />
+            </div>
+            <div class="col-6">
+              <q-input outlined dense readonly :model-value="selectedReCode || ''" label="Ingredient" />
+            </div>
+          </div>
+
+          <!-- Package Volume Input -->
+          <div class="row q-col-gutter-sm q-mb-md items-end">
+            <div class="col-4">
+              <q-input
+                outlined dense
+                v-model.number="scanFullLotPackageVol"
+                label="Package Volume (kg)"
+                type="number"
+                step="0.1"
+                min="0"
+                input-class="text-weight-bold text-center"
+                bg-color="purple-1"
+              />
+            </div>
+            <div class="col-8">
+              <div class="row q-col-gutter-xs">
+                <div class="col-4">
+                  <q-field outlined dense label="Remain (kg)" stack-label>
+                    <template v-slot:control>
+                      <div class="text-weight-bold text-h6 full-width text-center">{{ remainVolume.toFixed(2) }}</div>
+                    </template>
+                  </q-field>
+                </div>
+                <div class="col-4">
+                  <q-field outlined dense label="Full Packs" stack-label>
+                    <template v-slot:control>
+                      <div class="text-weight-bold text-h6 full-width text-center text-purple-9">{{ scanFullLotCalc.fullPacks }}</div>
+                    </template>
+                  </q-field>
+                </div>
+                <div class="col-4">
+                  <q-field outlined dense label="Weigh (kg)" stack-label>
+                    <template v-slot:control>
+                      <div class="text-weight-bold text-h6 full-width text-center" :class="scanFullLotCalc.remainder > 0 ? 'text-orange-9' : 'text-green-9'">
+                        {{ scanFullLotCalc.remainder.toFixed(4) }}
+                      </div>
+                    </template>
+                  </q-field>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Scan Input -->
+          <q-input
+            v-if="scanFullLotScanned.length < scanFullLotCalc.fullPacks"
+            outlined dense autofocus
+            v-model="scanFullLotInput"
+            :label="`Scan Lot ${scanFullLotScanned.length + 1} / ${scanFullLotCalc.fullPacks}`"
+            placeholder="ZAP INTAKE LOT BARCODE"
+            @keyup.enter="onScanFullLotEnter"
+            :loading="scanFullLotProcessing"
+            bg-color="purple-1"
+            input-class="text-weight-bold text-center"
+            class="q-mb-md"
+          >
+            <template v-slot:prepend>
+              <q-icon name="qr_code_scanner" color="purple-9" />
+            </template>
+          </q-input>
+
+          <q-banner v-else class="bg-green-1 text-green-9 q-mb-md" rounded>
+            <template v-slot:avatar><q-icon name="check_circle" color="green" /></template>
+            All {{ scanFullLotCalc.fullPacks }} full lots scanned!
+            <span v-if="scanFullLotCalc.remainder > 0" class="text-orange-9"> — Remaining {{ scanFullLotCalc.remainder.toFixed(4) }} kg → weigh on scale</span>
+          </q-banner>
+
+          <!-- Scanned Lots List -->
+          <q-list v-if="scanFullLotScanned.length > 0" bordered separator class="rounded-borders">
+            <q-item v-for="(item, idx) in scanFullLotScanned" :key="idx">
+              <q-item-section avatar>
+                <q-icon name="check_circle" color="green" />
+              </q-item-section>
+              <q-item-section>
+                <q-item-label class="text-weight-bold">Pkg #{{ item.pkg_no }} — {{ item.lot_id }}</q-item-label>
+                <q-item-label caption>{{ item.volume }} kg (full lot)</q-item-label>
+              </q-item-section>
+              <q-item-section side>
+                <q-badge color="green" :label="`${item.volume} kg`" />
+              </q-item-section>
+            </q-item>
+          </q-list>
+
+          <!-- Summary Bar -->
+          <div v-if="scanFullLotScanned.length > 0" class="q-mt-sm row justify-between items-center text-weight-bold">
+            <div>Scanned: {{ scanFullLotScanned.length }} / {{ scanFullLotCalc.fullPacks }}</div>
+            <div>Total: {{ scanFullLotScanned.reduce((s, o) => s + o.volume, 0).toFixed(2) }} kg</div>
+          </div>
+        </q-card-section>
+
+        <q-card-actions align="right" class="q-px-md q-pb-md">
+          <q-btn flat label="Close" color="grey-7" @click="showScanFullLotDialog = false" />
         </q-card-actions>
       </q-card>
     </q-dialog>
